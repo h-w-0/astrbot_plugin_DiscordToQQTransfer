@@ -23,6 +23,11 @@ except ImportError:
     from astrbot.core.message.message_event_result import MessageChain
 from .webhook import DiscordWebhookManager
 
+try:
+    from astrbot.core.platform.astr_message_event import MessageSesion
+except ImportError:
+    MessageSesion = None
+
 
 # ------------------------
 # 工具与数据路径
@@ -349,7 +354,7 @@ class MsgTransferStore:
         await self._write_json(self.msg_mapping_file, dict(data))
 
     async def set_msg_mapping(self, qq_msg_id: str, discord_msg_id: str,
-                              qq_user_id: str = "", qq_user_name: str = ""):
+                              qq_user_id: str = "", qq_user_name: str = "", origin: str = "qq"):
         async with self._msg_mapping_lock:
             data = await self._load_msg_mapping_raw()
 
@@ -359,7 +364,10 @@ class MsgTransferStore:
                 self._reverse_idx.pop(old_d_id, None)
 
             if qq_user_id:
-                data[qq_msg_id] = f"{discord_msg_id}|{qq_user_id}|{qq_user_name}"
+                if origin and origin != "qq":
+                    data[qq_msg_id] = f"{discord_msg_id}|{qq_user_id}|{qq_user_name}|{origin}"
+                else:
+                    data[qq_msg_id] = f"{discord_msg_id}|{qq_user_id}|{qq_user_name}"
             else:
                 data[qq_msg_id] = discord_msg_id
 
@@ -395,7 +403,11 @@ class MsgTransferStore:
             data.move_to_end(qq_msg_id)
             if isinstance(val, str) and '|' in val:
                 parts = val.split('|')
-                return {"user_id": parts[1], "user_name": parts[2] if len(parts) > 2 else parts[1]}
+                return {
+                    "user_id": parts[1],
+                    "user_name": parts[2] if len(parts) > 2 else parts[1],
+                    "origin": parts[3] if len(parts) > 3 else "qq",
+                }
             return None
 
     async def find_qq_msg_id_by_discord_id(self, discord_msg_id: str) -> str | None:
@@ -420,6 +432,41 @@ class MsgTransferStore:
                 existing = self._forward_text_idx.get(content)
                 if existing is None or ts > existing[1]:
                     self._forward_text_idx[content] = (d_msg_id, ts, sid)
+
+    @staticmethod
+    def _normalize_forward_content(content: str) -> str:
+        """规范化转发文本，降低 QQ 引用文本与 Discord 原文的格式差异影响"""
+        if not content:
+            return ""
+
+        normalized = str(content).replace("\u200b", "").replace("\ufeff", "")
+        normalized = normalized.strip().replace("：", ":")
+        fwd_match = re.match(r"^\[转发\]\s+.+?(?:\s+\([^)]+\))?\s*:\s*(.*)$", normalized, flags=re.S)
+        if fwd_match:
+            normalized = fwd_match.group(1).strip()
+        normalized = re.sub(r"\s+", " ", normalized)
+        return normalized
+
+    async def _find_forward_log_by_normalized_content(self, content: str) -> tuple[str, str | None] | None:
+        """按规范化文本查找最新的 Discord 转发记录，返回 (discord_msg_id, sender_id)"""
+        normalized = self._normalize_forward_content(content)
+        if not normalized:
+            return None
+
+        async with self._forward_log_lock:
+            data = await self._load_forward_log_raw()
+            best = None
+            for d_msg_id, entry in data.items():
+                entry_content = entry.get("content", "") if isinstance(entry, dict) else ""
+                if self._normalize_forward_content(entry_content) != normalized:
+                    continue
+                ts = entry.get("timestamp", 0) if isinstance(entry, dict) else 0
+                sender_id = entry.get("sender_id") if isinstance(entry, dict) else None
+                if best is None or ts > best[2]:
+                    best = (d_msg_id, sender_id, ts)
+            if best:
+                return best[0], best[1]
+            return None
 
     async def _load_forward_log_raw(self) -> dict:
         if self._forward_log is None:
@@ -461,7 +508,10 @@ class MsgTransferStore:
             async with self._forward_log_lock:
                 await self._load_forward_log_raw()
         result = self._forward_text_idx.get(content)
-        return result[0] if result else None
+        if result:
+            return result[0]
+        normalized_result = await self._find_forward_log_by_normalized_content(content)
+        return normalized_result[0] if normalized_result else None
 
     async def find_forward_log_sender(self, content: str) -> str | None:
         if not content:
@@ -470,7 +520,10 @@ class MsgTransferStore:
             async with self._forward_log_lock:
                 await self._load_forward_log_raw()
         result = self._forward_text_idx.get(content)
-        return result[2] if result and len(result) > 2 else None
+        if result and len(result) > 2:
+            return result[2]
+        normalized_result = await self._find_forward_log_by_normalized_content(content)
+        return normalized_result[1] if normalized_result else None
 
 
 # ------------------------
@@ -640,8 +693,9 @@ class MsgTransfer(star.Star):
 
                 # Discord 端回复消息时，检测引用关系并还原 QQ 引用链
                 chain = await self._build_discord_reply_chain(event, source_platform_name, sender_name, msg_text, full_text)
-                sent = await self.context.send_message(target, chain)
+                sent, sent_result = await self._send_message_with_result(target, chain)
                 if sent:
+                    await self._record_discord_to_target_mapping(event, sent_result, source_platform_name)
                     logger.info(f"已转发 #{rid} -> {target}")
                 else:
                     logger.warning(f"转发 #{rid} 未找到目标平台适配器: {target}")
@@ -663,7 +717,7 @@ class MsgTransfer(star.Star):
                     orig_qq_id = await self.store.find_qq_msg_id_by_discord_id(str(_ref.message_id))
                     if orig_qq_id:
                         meta = await self.store.get_msg_meta(orig_qq_id)
-                        if meta:
+                        if meta and meta.get("origin", "qq") == "qq":
                             chain_parts.append(Reply(id=orig_qq_id))
                             chain_parts.append(Plain(text=f"[转发] {sender_name} ({source_platform_name}):"))
                             chain_parts.append(At(qq=meta['user_id']))
@@ -679,6 +733,82 @@ class MsgTransfer(star.Star):
         chain = MessageChain()
         chain.chain = chain_parts
         return chain
+
+    @staticmethod
+    def _extract_message_id_from_send_result(result) -> str | None:
+        """从不同平台 send_by_session 返回值中尽力提取发送后的消息 ID"""
+        if result is None or isinstance(result, bool):
+            return None
+
+        if isinstance(result, (str, int)):
+            return str(result)
+
+        if isinstance(result, dict):
+            for key in ("message_id", "msg_id", "id"):
+                value = result.get(key)
+                if value:
+                    return str(value)
+            for key in ("data", "result", "message"):
+                nested = result.get(key)
+                nested_id = MsgTransfer._extract_message_id_from_send_result(nested)
+                if nested_id:
+                    return nested_id
+            return None
+
+        for attr in ("message_id", "msg_id", "id"):
+            value = getattr(result, attr, None)
+            if value:
+                return str(value)
+
+        if isinstance(result, (list, tuple)):
+            for item in result:
+                nested_id = MsgTransfer._extract_message_id_from_send_result(item)
+                if nested_id:
+                    return nested_id
+
+        return None
+
+    async def _send_message_with_result(self, target: str, chain: MessageChain) -> tuple[bool, object | None]:
+        """发送消息并保留底层平台返回值；失败时保持 Context.send_message 的语义"""
+        if MessageSesion is None:
+            sent = await self.context.send_message(target, chain)
+            return bool(sent), sent
+
+        session = MessageSesion.from_str(target) if isinstance(target, str) else target
+        platform_manager = getattr(self.context, "platform_manager", None)
+        platform_insts = getattr(platform_manager, "platform_insts", []) if platform_manager else []
+        for platform in platform_insts:
+            meta = platform.meta()
+            if meta.name != session.platform_name:
+                continue
+            result = await platform.send_by_session(session, chain)
+            return True, result
+        return False, None
+
+    async def _record_discord_to_target_mapping(self, event: AstrMessageEvent, sent_result, source_platform_name: str):
+        """记录 Discord→QQ 转发后目标平台消息 ID 到 Discord 原消息 ID 的映射"""
+        if source_platform_name != "discord":
+            return
+
+        discord_msg_id = getattr(event.message_obj, "message_id", None)
+        if not discord_msg_id:
+            return
+
+        sent_msg_id = self._extract_message_id_from_send_result(sent_result)
+        if not sent_msg_id:
+            logger.debug("Discord→QQ 转发成功，但无法从发送结果提取目标消息 ID，保留文本回退匹配")
+            return
+
+        try:
+            await self.store.set_msg_mapping(
+                str(sent_msg_id),
+                str(discord_msg_id),
+                event.get_sender_id(),
+                event.get_sender_name(),
+                origin="discord",
+            )
+        except Exception as e:
+            logger.error(f"保存 Discord→QQ 消息映射失败(不影响发送): {e}")
 
     # ---- Webhook 辅助方法 ----
 
@@ -738,10 +868,14 @@ class MsgTransfer(star.Star):
     async def _resolve_reply_target(self, reply_to_qq_id, quote_text, target_umo):
         """解析回复目标，返回 (reply_to_discord_id, discord_sender_id, jump_url)"""
         reply_to_discord_id = None
+        discord_sender_id = None
         if reply_to_qq_id:
             reply_to_discord_id = await self.store.get_msg_mapping(reply_to_qq_id)
+            if reply_to_discord_id:
+                meta = await self.store.get_msg_meta(reply_to_qq_id)
+                if meta and meta.get("origin") == "discord":
+                    discord_sender_id = meta.get("user_id")
 
-        discord_sender_id = None
         if reply_to_discord_id is None and quote_text:
             fwd_discord_id = await self.store.find_forward_log_by_content(quote_text)
             if fwd_discord_id:
