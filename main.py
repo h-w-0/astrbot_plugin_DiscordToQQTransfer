@@ -783,7 +783,9 @@ class MsgTransfer(star.Star):
                 continue
             result = await platform.send_by_session(session, chain)
             return True, result
-        return False, None
+
+        sent = await self.context.send_message(target, chain)
+        return bool(sent), sent
 
     async def _record_discord_to_target_mapping(self, event: AstrMessageEvent, sent_result, source_platform_name: str):
         """记录 Discord→QQ 转发后目标平台消息 ID 到 Discord 原消息 ID 的映射"""
