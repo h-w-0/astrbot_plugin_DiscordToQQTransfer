@@ -79,6 +79,50 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(allowed)
         self.assertEqual(reason, "安全审核失败或超时")
 
+    async def test_string_false_block_on_error_allows_provider_error(self):
+        plugin = object.__new__(MsgTransfer)
+        plugin.context = DummyContext()
+        plugin.plugin_config = {
+            "llm_safety_check": {
+                "enabled": True,
+                "block_on_error": "false",
+                "timeout_seconds": 1,
+            }
+        }
+        event = SimpleNamespace(
+            message_obj=SimpleNamespace(message_id="discord-3"),
+            unified_msg_origin="discord:channel:1",
+            get_sender_name=lambda: "tester",
+            get_sender_id=lambda: "user-1",
+        )
+
+        allowed, reason = await plugin._passes_llm_safety_check(event, "普通消息")
+
+        self.assertTrue(allowed)
+        self.assertEqual(reason, "安全审核失败或超时")
+
+    async def test_string_false_enabled_disables_safety_check(self):
+        plugin = object.__new__(MsgTransfer)
+        plugin.context = DummyContext()
+        plugin.plugin_config = {
+            "llm_safety_check": {
+                "enabled": "false",
+                "block_on_error": True,
+                "timeout_seconds": 1,
+            }
+        }
+        event = SimpleNamespace(
+            message_obj=SimpleNamespace(message_id="discord-4"),
+            unified_msg_origin="discord:channel:1",
+            get_sender_name=lambda: "tester",
+            get_sender_id=lambda: "user-1",
+        )
+
+        allowed, reason = await plugin._passes_llm_safety_check(event, "普通消息")
+
+        self.assertTrue(allowed)
+        self.assertEqual(reason, "")
+
 
 if __name__ == "__main__":
     unittest.main()
