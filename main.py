@@ -2,19 +2,17 @@ import asyncio
 import json
 import re
 import secrets
+import string
 import time
 import urllib.parse
 from collections import OrderedDict
 from pathlib import Path
 
 import aiohttp
-
 import astrbot.api.star as star
-from astrbot.api.event import filter, AstrMessageEvent
-from astrbot.api.star import Context, Star
 from astrbot.api import logger
-
-import string
+from astrbot.api.event import filter, AstrMessageEvent
+from astrbot.api.star import Context
 
 try:
     from astrbot.api.message_components import Plain, Reply, At, MessageChain
@@ -27,6 +25,23 @@ try:
     from astrbot.core.platform.astr_message_event import MessageSesion
 except ImportError:
     MessageSesion = None
+
+try:
+    from openai import OpenAIError as _OpenAIError
+except ImportError:
+    _OpenAIError = None
+
+if _OpenAIError is None:
+    llm_provider_error_types = (asyncio.TimeoutError, aiohttp.ClientError, OSError, ValueError, RuntimeError)
+else:
+    llm_provider_error_types = (
+        asyncio.TimeoutError,
+        aiohttp.ClientError,
+        OSError,
+        ValueError,
+        RuntimeError,
+        _OpenAIError,
+    )
 
 
 # ------------------------
@@ -908,7 +923,7 @@ class MsgTransfer(star.Star):
             if not safe:
                 logger.warning(f"LLM 安全筛查判定拦截: {reason}")
             return safe, reason
-        except (asyncio.TimeoutError, aiohttp.ClientError, OSError, ValueError, RuntimeError) as e:
+        except llm_provider_error_types as e:
             logger.warning(f"LLM 安全筛查失败: {e}")
             return not bool(cfg.get("block_on_error")), "安全审核失败或超时"
 
