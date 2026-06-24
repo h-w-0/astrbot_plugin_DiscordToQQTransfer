@@ -3,6 +3,8 @@ import asyncio
 import re
 import urllib.parse
 import aiohttp
+import json
+from pathlib import Path
 from astrbot.api import logger
 from astrbot.core.star.star import star_map
 
@@ -144,6 +146,22 @@ class DiscordWebhookManager:
             return None
 
     @staticmethod
+    def extract_local_image_paths(message_chain) -> list:
+        """从消息链中提取本地图片文件路径（v4.26+ 适配）"""
+        paths = []
+        for component in message_chain:
+            if component.__class__.__name__ == "Image":
+                # v4.26+ preprocess 会将图片统一下载到本地 temp
+                for attr in ('url', 'file', 'path'):
+                    val = getattr(component, attr, None)
+                    if val and isinstance(val, str) and not val.startswith(('http://', 'https://', 'data:', 'base64://')):
+                        p = Path(val.replace("file:///", ""))
+                        if p.exists():
+                            paths.append(str(p))
+                            break
+        return paths
+
+    @staticmethod
     def get_qq_avatar_url(qq_id: str) -> str:
         """获取QQ用户头像URL"""
         return f"http://q1.qlogo.cn/g?b=qq&nk={qq_id}&s=100"
@@ -186,12 +204,12 @@ class DiscordWebhookManager:
 
     @staticmethod
     def extract_images(message_chain) -> list:
-        """从消息链中提取所有图片URL"""
+        """从消息链中提取所有图片URL（v4.26+ 兼容 url/file/path）"""
         urls = []
         for component in message_chain:
             if component.__class__.__name__ == "Image":
-                img_url = getattr(component, 'url', None)
-                if img_url:
+                img_url = getattr(component, 'url', None) or getattr(component, 'file', None) or getattr(component, 'path', None)
+                if img_url and isinstance(img_url, str) and (img_url.startswith("http://") or img_url.startswith("https://")):
                     urls.append(img_url)
         return urls
 
@@ -208,8 +226,8 @@ class DiscordWebhookManager:
             elif component.__class__.__name__ == "Image":
                 if skip_images:
                     continue
-                img_url = getattr(component, 'url', None)
-                if img_url:
+                img_url = getattr(component, 'url', None) or getattr(component, 'file', None) or getattr(component, 'path', None)
+                if img_url and isinstance(img_url, str) and (img_url.startswith("http://") or img_url.startswith("https://")):
                     extra_lines.append(img_url)
                 else:
                     text_parts.append("[图片]")
@@ -246,11 +264,15 @@ class DiscordWebhookManager:
         avatar_url: str,
         content: str,
         embeds: list | None = None,
+        files: list[str] | None = None,
     ) -> str | None:
-        """发送消息到Discord Webhook，返回Discord消息ID（失败返回None）"""
+        """发送消息到Discord Webhook，返回Discord消息ID（失败返回None）
+
+        files: 本地文件路径列表，作为 multipart 附件上传到 Discord
+        """
         try:
-            if not content and not embeds:
-                content = "​"  # zero-width space, prevents Discord "message cannot be empty" rejection
+            if not content and not embeds and not files:
+                content = "\u200b"  # zero-width space, prevents Discord "message cannot be empty" rejection
 
             username = self._sanitize_username(username)
             content = self._truncate_content(content)
@@ -265,6 +287,32 @@ class DiscordWebhookManager:
                 payload["embeds"] = embeds
 
             session = await self._get_session()
+
+            # 有本地文件时使用 multipart 上传
+            if files:
+                form = aiohttp.FormData()
+                form.add_field("payload_json", json.dumps(payload), content_type="application/json")
+                for i, fp in enumerate(files):
+                    path = Path(fp)
+                    if path.exists():
+                        ext = path.suffix.lower()
+                        mime = {".png": "image/png", ".gif": "image/gif", ".webp": "image/webp"}.get(ext, "image/jpeg")
+                        form.add_field(
+                            f"file[{i}]",
+                            path.read_bytes(),
+                            filename=path.name,
+                            content_type=mime,
+                        )
+                async with session.post(webhook_url, data=form, params={"wait": "true"}) as resp:
+                    if resp.status not in (200, 201, 204):
+                        body = await resp.text()
+                        logger.error(f"Webhook发送失败 [HTTP {resp.status}]: {body[:500]}")
+                        return None
+                    if resp.status == 204:
+                        return None
+                    data = await resp.json()
+                    return data.get("id")
+
             async with session.post(webhook_url, json=payload, params={"wait": "true"}) as resp:
                 if resp.status not in (200, 201, 204):
                     body = await resp.text()

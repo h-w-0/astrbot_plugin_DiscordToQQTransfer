@@ -1199,11 +1199,15 @@ class MsgTransfer(star.Star):
             # Step 5-6: 构建 webhook 内容（含引用块）和 embeds
             virtual_username = DiscordWebhookManager.build_virtual_username(sender_name, source_platform)
             avatar_url = DiscordWebhookManager.get_avatar_url(source_platform, sender_id)
-            # 提取图片并转为 Discord embeds，内容中不再包含图片 URL
+            # 提取图片并转为 Discord embeds / file 附件
             image_urls = DiscordWebhookManager.extract_images(new_chain)
+            local_images = DiscordWebhookManager.extract_local_image_paths(new_chain)
             raw_content = DiscordWebhookManager.format_message_content(new_chain, skip_images=True)
             content = self._build_webhook_quote(raw_content, reply_to_discord_id, jump_url, quote_text, quote_sender)
             embeds = [{"image": {"url": url}} for url in image_urls[:10]]  # Discord 最多 10 个 embed
+            # v4.26+ 本地图片通过 multipart 上传，不再依赖 HTTP embed
+            if not content and not embeds and not local_images:
+                content = "[图片]"
 
             # Step 7: 发送并记录映射
             discord_msg_id = await self.webhook_manager.send_webhook_message(
@@ -1212,6 +1216,7 @@ class MsgTransfer(star.Star):
                 avatar_url=avatar_url,
                 content=content,
                 embeds=embeds if embeds else None,
+                files=local_images[:10] if local_images else None,
             )
 
             if discord_msg_id:
