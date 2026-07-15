@@ -36,7 +36,18 @@
 
 ## ⚙️ 配置
 
-插件无需额外配置，所有规则通过命令创建。绑定 Discord 目标时会自动创建 Webhook。
+转发规则可以通过 Dashboard 的 `forward_rules` 配置，也可以继续通过命令创建。
+
+- `forward_rules`：按 `source_umo → target_umo` 配置消息转发关系，支持动态增删。
+- 配置规则与命令创建的规则会合并执行，重复的源/目标组合只转发一次。
+- 配置规则的 Discord 目标会在插件启动时自动尝试创建 Webhook。
+
+如需启用 Discord → QQ 的 LLM 内容安全筛查，可在 Dashboard 配置 `llm_safety_check`：
+
+- `enabled`：启用安全筛查。
+- `llm_providers`：按顺序尝试的供应商列表，支持 `OpenAI 兼容`、`AstrBot 当前 Provider` 和 `ModelScope`。
+- `llm_providers` 留空时使用当前会话的 AstrBot Provider。
+- `block_on_error`：LLM 调用失败或超时时是否阻止转发。
 
 ---
 
@@ -57,7 +68,7 @@
 
 | 文件 | 用途 |
 |------|------|
-| `rules.json` | 转发规则（源 UMO → 目标 UMO） |
+| `rules.json` | 命令创建的转发规则（Dashboard 规则来自插件配置） |
 | `pending.json` | 待绑定的请求 |
 | `webhooks.json` | Discord Webhook URL 映射 |
 | `mappings.json` | QQ 号 → QQ 昵称映射 |
