@@ -41,6 +41,34 @@
               }
             }
           },
+          "responses_api": {
+            "name": "OpenAI Responses API",
+            "description": "使用 OpenAI Responses API 的供应商（支持官方 OpenAI 及兼容 Responses API 的服务）",
+            "items": {
+              "name": {
+                "description": "供应商别名（仅用于日志标识和区分）",
+                "type": "string",
+                "default": "OpenAI Responses API"
+              },
+              "api_key": {
+                "description": "API Key",
+                "type": "string",
+                "default": ""
+              },
+              "base_url": {
+                "description": "API 地址",
+                "type": "string",
+                "default": "https://api.openai.com",
+                "hint": "例如：https://api.openai.com；插件会自动追加 /v1/responses"
+              },
+              "model": {
+                "description": "模型名（留空则使用默认模型）",
+                "type": "string",
+                "default": "",
+                "hint": "例如：gpt-4o、gpt-5"
+              }
+            }
+          },
           "astrbot_provider": {
             "name": "AstrBot 当前 Provider",
             "description": "复用 AstrBot 当前会话配置的 LLM Provider（不需要填写 API Key 等额外信息）",
@@ -83,7 +111,7 @@
         }
       },
       "reasoning_effort": {
-        "description": "设置 OpenAI 兼容 API 请求中的 reasoning_effort 参数。设为空字符串则不传递此参数。",
+        "description": "设置 OpenAI 兼容 API 或 Responses API 请求中的推理强度。设为空字符串则不传递此参数。",
         "type": "string",
         "default": "",
         "hint": "可选值：留空 / low / medium / high"

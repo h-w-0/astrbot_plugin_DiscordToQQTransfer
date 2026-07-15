@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from types import ModuleType
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import openai
 
@@ -51,6 +51,31 @@ class DummyContext:
 
 
 class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
+    async def test_notice_event_is_ignored_before_forwarding(self):
+        plugin = object.__new__(MsgTransfer)
+        plugin._list_forward_rules = AsyncMock(
+            side_effect=AssertionError("notice 事件不应查询转发规则")
+        )
+        event = SimpleNamespace(
+            message_obj=SimpleNamespace(
+                raw_message={"post_type": "notice", "notice_type": "group_recall"}
+            )
+        )
+
+        await plugin.forward_message(event)
+
+    async def test_message_event_still_enters_forwarding(self):
+        plugin = object.__new__(MsgTransfer)
+        plugin._list_forward_rules = AsyncMock(return_value={})
+        event = SimpleNamespace(
+            unified_msg_origin="aiocqhttp:GroupMessage:123456",
+            message_obj=SimpleNamespace(raw_message={"post_type": "message"})
+        )
+
+        await plugin.forward_message(event)
+
+        plugin._list_forward_rules.assert_awaited_once()
+
     async def test_openai_provider_error_follows_allow_on_error_config(self):
         plugin = object.__new__(MsgTransfer)
         plugin.context = DummyContext()
@@ -225,6 +250,123 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
         plugin._call_openai_compatible_safety_provider.assert_awaited_once()
         self.assertEqual(len(provider.calls), 1)
 
+    async def test_responses_api_provider_builds_request_and_extracts_output_text(self):
+        plugin = object.__new__(MsgTransfer)
+        fake_client = MagicMock()
+        fake_client.responses.create = AsyncMock(
+            return_value=SimpleNamespace(
+                output_text='{"safe": true, "reason": "Responses API 正常"}'
+            )
+        )
+        fake_client.close = AsyncMock()
+        provider = {
+            "name": "Responses",
+            "api_key": "test-key",
+            "base_url": "https://api.openai.com",
+            "model": "gpt-5",
+        }
+        cfg = {
+            "reasoning_effort": "high",
+            "timeout_seconds": 5,
+        }
+
+        with patch.object(module, "_AsyncOpenAI", return_value=fake_client) as client_factory:
+            result = await plugin._call_responses_api_safety_provider(
+                prompt="审核载荷",
+                system_prompt="system",
+                provider=provider,
+                cfg=cfg,
+            )
+
+        self.assertEqual(result, '{"safe": true, "reason": "Responses API 正常"}')
+        client_factory.assert_called_once_with(
+            api_key="test-key",
+            base_url="https://api.openai.com/v1",
+            timeout=5.0,
+        )
+        fake_client.responses.create.assert_awaited_once_with(
+            model="gpt-5",
+            instructions="system",
+            input="审核载荷",
+            max_output_tokens=512,
+            reasoning={"effort": "high"},
+        )
+        fake_client.close.assert_awaited_once()
+
+    async def test_responses_api_provider_accepts_base_url_with_v1_suffix(self):
+        plugin = object.__new__(MsgTransfer)
+        fake_client = MagicMock()
+        fake_client.responses.create = AsyncMock(
+            return_value=SimpleNamespace(output_text='{"safe": true}')
+        )
+        fake_client.close = AsyncMock()
+        provider = {
+            "api_key": "test-key",
+            "base_url": "https://api.openai.com/v1/",
+        }
+
+        with patch.object(module, "_AsyncOpenAI", return_value=fake_client) as client_factory:
+            await plugin._call_responses_api_safety_provider(
+                prompt="prompt",
+                system_prompt="system",
+                provider=provider,
+                cfg={},
+            )
+
+        client_factory.assert_called_once_with(
+            api_key="test-key",
+            base_url="https://api.openai.com/v1",
+            timeout=10.0,
+        )
+
+    def test_responses_api_provider_extracts_nested_output_text(self):
+        response_json = {
+            "output": [
+                {"type": "reasoning", "content": []},
+                {
+                    "type": "message",
+                    "content": [
+                        {"type": "output_text", "text": '{"safe": false'},
+                        {"type": "output_text", "text": ', "reason": "风险"}'},
+                    ],
+                },
+            ]
+        }
+
+        result = MsgTransfer._extract_responses_api_text(response_json, "Responses")
+
+        self.assertEqual(result, '{"safe": false, "reason": "风险"}')
+
+    async def test_responses_api_template_uses_responses_provider(self):
+        plugin = object.__new__(MsgTransfer)
+        plugin._call_responses_api_safety_provider = AsyncMock(
+            return_value='{"safe": true, "reason": "正常"}'
+        )
+        plugin._call_openai_compatible_safety_provider = AsyncMock(
+            side_effect=AssertionError("Responses API 不应调用 Chat Completions")
+        )
+        cfg = {
+            "llm_providers": [
+                {
+                    "__template_key": "responses_api",
+                    "name": "Responses",
+                }
+            ],
+            "system_prompt": "system",
+            "timeout_seconds": 1,
+        }
+
+        result = await plugin._call_llm_safety(
+            prompt="prompt",
+            cfg=cfg,
+            session_id="session-1",
+            umo="discord:channel:1",
+        )
+
+        self.assertEqual(result, '{"safe": true, "reason": "正常"}')
+        plugin._call_responses_api_safety_provider.assert_awaited_once()
+        plugin._call_openai_compatible_safety_provider.assert_not_awaited()
+
     def test_provider_id_is_not_part_of_runtime_config(self):
         plugin = object.__new__(MsgTransfer)
         plugin.plugin_config = {
@@ -247,7 +389,12 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(providers["type"], "template_list")
         self.assertEqual(
             set(providers["templates"]),
-            {"openai_compatible", "astrbot_provider", "modelscope"},
+            {
+                "openai_compatible",
+                "responses_api",
+                "astrbot_provider",
+                "modelscope",
+            },
         )
         forward_rules = schema["forward_rules"]
         self.assertEqual(forward_rules["type"], "template_list")

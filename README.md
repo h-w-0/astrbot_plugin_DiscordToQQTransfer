@@ -45,8 +45,9 @@
 如需启用 Discord → QQ 的 LLM 内容安全筛查，可在 Dashboard 配置 `llm_safety_check`：
 
 - `enabled`：启用安全筛查。
-- `llm_providers`：按顺序尝试的供应商列表，支持 `OpenAI 兼容`、`AstrBot 当前 Provider` 和 `ModelScope`。
+- `llm_providers`：按顺序尝试的供应商列表，支持 `OpenAI 兼容`、`OpenAI Responses API`、`AstrBot 当前 Provider` 和 `ModelScope`。
 - `llm_providers` 留空时使用当前会话的 AstrBot Provider。
+- `OpenAI Responses API` 供应商默认请求 `https://api.openai.com/v1/responses`，也支持填写兼容 Responses API 的自定义地址。
 - `block_on_error`：LLM 调用失败或超时时是否阻止转发。
 
 ---

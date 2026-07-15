@@ -27,8 +27,10 @@ except ImportError:
     MessageSesion = None
 
 try:
+    from openai import AsyncOpenAI as _AsyncOpenAI
     from openai import OpenAIError as _OpenAIError
 except ImportError:
+    _AsyncOpenAI = None
     _OpenAIError = None
 
 if _OpenAIError is None:
@@ -738,6 +740,10 @@ class MsgTransfer(star.Star):
     async def forward_message(self, event: AstrMessageEvent):
         """主转发逻辑 - 顺序队列处理所有转发规则，保证顺序一致"""
         try:
+            if self._is_notice_event(event):
+                logger.debug("忽略 notice 事件，不参与消息转发")
+                return
+
             source_umo = str(event.unified_msg_origin)
             rules = await self._list_forward_rules(source_umo)
             if not rules:
@@ -756,6 +762,17 @@ class MsgTransfer(star.Star):
                 await self._forward_single_rule(event, rule, rid, source_umo, message_chain)
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError, KeyError) as e:
             logger.error(f"❌ 转发逻辑异常: {e}", exc_info=True)
+
+    @staticmethod
+    def _is_notice_event(event) -> bool:
+        """判断事件原始载荷是否为 OneBot 通知事件"""
+        message_obj = getattr(event, "message_obj", None)
+        raw_message = getattr(message_obj, "raw_message", None)
+        if isinstance(raw_message, dict):
+            post_type = raw_message.get("post_type")
+        else:
+            post_type = getattr(raw_message, "post_type", None)
+        return isinstance(post_type, str) and post_type.lower() == "notice"
 
     async def _forward_single_rule(self, event: AstrMessageEvent, rule: dict, rid: str, source_umo: str, message_chain):
         """处理单个转发规则"""
@@ -971,6 +988,92 @@ class MsgTransfer(star.Star):
             raise ValueError(f"{api_name} 返回内容为空")
         return str(content)
 
+    @staticmethod
+    def _extract_responses_api_text(response_json: dict, api_name: str) -> str:
+        """从 Responses API 响应中提取模型文本"""
+        if not isinstance(response_json, dict):
+            raise ValueError(f"{api_name} 返回格式无效")
+
+        output_text = response_json.get("output_text")
+        if output_text is not None and str(output_text).strip():
+            return str(output_text)
+
+        text_parts = []
+        output_items = response_json.get("output", [])
+        if isinstance(output_items, list):
+            for output_item in output_items:
+                if not isinstance(output_item, dict):
+                    continue
+                content_items = output_item.get("content", [])
+                if not isinstance(content_items, list):
+                    continue
+                for content_item in content_items:
+                    if not isinstance(content_item, dict):
+                        continue
+                    if content_item.get("type") != "output_text":
+                        continue
+                    text = content_item.get("text")
+                    if text is not None and str(text).strip():
+                        text_parts.append(str(text))
+
+        content = "".join(text_parts)
+        if not content.strip():
+            raise ValueError(f"{api_name} 返回内容为空")
+        return content
+
+    async def _call_responses_api_safety_provider(
+        self,
+        prompt: str,
+        system_prompt: str,
+        provider: dict,
+        cfg: dict,
+    ) -> str:
+        """调用单个 OpenAI Responses API 供应商进行安全筛查"""
+        api_key = provider.get("api_key", "")
+        base_url = provider.get("base_url", "")
+        model_name = provider.get("model", "")
+        api_name = provider.get("name", "OpenAI Responses API")
+        if not api_key or not base_url:
+            raise ValueError(f"「{api_name}」未配置 api_key 或 base_url")
+        if _AsyncOpenAI is None:
+            raise RuntimeError("未安装 openai 依赖，无法调用 Responses API")
+
+        request_kwargs = {
+            "model": model_name or "gpt-4o",
+            "instructions": system_prompt,
+            "input": prompt,
+            "max_output_tokens": 512,
+        }
+        reasoning_effort = cfg.get("reasoning_effort", "")
+        if reasoning_effort:
+            request_kwargs["reasoning"] = {"effort": reasoning_effort}
+
+        normalized_base_url = base_url.rstrip("/")
+        if not normalized_base_url.endswith("/v1"):
+            normalized_base_url = f"{normalized_base_url}/v1"
+
+        client = _AsyncOpenAI(
+            api_key=api_key,
+            base_url=normalized_base_url,
+            timeout=float(cfg.get("timeout_seconds", 10)),
+        )
+        try:
+            response = await client.responses.create(**request_kwargs)
+        finally:
+            await client.close()
+
+        output_text = getattr(response, "output_text", None)
+        if output_text is not None and str(output_text).strip():
+            return str(output_text)
+
+        if hasattr(response, "model_dump"):
+            response_json = response.model_dump()
+        elif hasattr(response, "to_dict"):
+            response_json = response.to_dict()
+        else:
+            response_json = response
+        return self._extract_responses_api_text(response_json, api_name)
+
     async def _call_llm_safety(
         self,
         prompt: str,
@@ -1015,8 +1118,20 @@ class MsgTransfer(star.Star):
                         ),
                         timeout=timeout_seconds,
                     )
+                elif template == "responses_api":
+                    logger.info(f"尝试 OpenAI Responses API 供应商「{provider_name}」...")
+                    result = await asyncio.wait_for(
+                        self._call_responses_api_safety_provider(
+                            prompt,
+                            str(cfg.get("system_prompt", "")),
+                            provider,
+                            cfg,
+                        ),
+                        timeout=timeout_seconds,
+                    )
                 else:
-                    logger.info(f"尝试 OpenAI 兼容供应商「{provider_name}」...")
+                    provider_type = "ModelScope" if template == "modelscope" else "OpenAI 兼容"
+                    logger.info(f"尝试 {provider_type} 供应商「{provider_name}」...")
                     result = await asyncio.wait_for(
                         self._call_openai_compatible_safety_provider(
                             prompt,
