@@ -262,7 +262,7 @@
       "system_prompt": {
         "description": "翻译指令模板。可用占位符：{source_text}、{target_language}。",
         "type": "text",
-        "default": "Translate the following text into {target_language}. First detect the source language, then translate. Output format: (从<source_language>翻译)<translated_text>. Only output the result, no additional explanation.\n\n{source_text}"
+        "default": "Translate into {target_language}. Start with [source_lang_code] then the translation. Example: [en]你好\n\n{source_text}"
       }
     }
   },

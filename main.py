@@ -910,7 +910,7 @@ class MsgTransfer(star.Star):
             "enabled": False,
             "llm_providers": [],
             "timeout_seconds": 30,
-            "system_prompt": "Translate the following text into {target_language}. First detect the source language, then translate. Output format: (从<source_language>翻译)<translated_text>. Only output the result, no additional explanation.\n\n{source_text}",
+            "system_prompt": "Translate into {target_language}. Start with [source_lang_code] then the translation. Example: [en]你好\n\n{source_text}",
         }
         config = self.plugin_config or {}
         section = config.get("llm_translation", {}) if hasattr(config, "get") else {}
@@ -1342,7 +1342,16 @@ class MsgTransfer(star.Star):
                 tag="翻译",
             )
             if response_text and response_text.strip():
-                return response_text.strip()
+                raw = response_text.strip()
+                # 尝试解析 [lang_code] 前缀
+                match = re.match(r'^\[([a-zA-Z_-]+)\]\s*(.*)', raw, flags=re.S)
+                if match:
+                    src_code = match.group(1).strip()
+                    translation = match.group(2).strip()
+                    if translation:
+                        return f"(从{src_code}翻译){translation}"
+                # fallback: 模型未按格式输出，直接返回
+                return f"(翻译){raw}"
             return None
         except llm_provider_error_types as e:
             logger.warning(f"LLM 翻译失败: {e}")
