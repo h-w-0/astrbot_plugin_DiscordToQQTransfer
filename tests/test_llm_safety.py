@@ -1,6 +1,7 @@
 import asyncio
 import importlib.util
 import json
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -562,22 +563,24 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
 
         result = await plugin._translate_message(event, "你好", rule)
 
-        self.assertEqual(result, "(翻译)Hello")
+        # langdetect 检测"你好"的源语言，验证前缀格式正确
+        detected = plugin._detect_source_language("你好")
+        expected = f"(从{detected}翻译)Hello"
+        self.assertEqual(result, expected)
         plugin._call_llm.assert_awaited_once()
         call_kwargs = plugin._call_llm.call_args[1]
         self.assertIn("你好", call_kwargs["prompt"])
         self.assertIn("English", call_kwargs["prompt"])
-        # 验证 {source_text} 和 {target_language} 占位符被替换
         self.assertNotIn("{source_text}", call_kwargs["prompt"])
         self.assertNotIn("{target_language}", call_kwargs["prompt"])
         self.assertEqual(call_kwargs["tag"], "翻译")
         # 验证 system_prompt 被清空（Hy-MT2 兼容）
         self.assertEqual(call_kwargs["cfg"]["system_prompt"], "")
 
-    async def test_translation_parses_bracket_format(self):
-        """验证 LLM 按 [code] 格式输出时被正确解析"""
+    async def test_translation_detects_source_language(self):
+        """验证自动检测源语言并显示正确的 (从xxx翻译) 前缀"""
         plugin = object.__new__(MsgTransfer)
-        plugin._call_llm = AsyncMock(return_value="[en]Hello")
+        plugin._call_llm = AsyncMock(return_value="Bonjour le monde")
         plugin.plugin_config = {
             "llm_translation": {
                 "enabled": True,
@@ -591,21 +594,28 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
         rule = {
             "source_umo": "discord:ChannelMessage:1",
             "target_umo": "aiocqhttp:GroupMessage:2",
-            "translation": {"enabled": True, "target_language": "English"},
+            "translation": {"enabled": True, "target_language": "French"},
         }
 
-        result = await plugin._translate_message(event, "你好", rule)
+        # langdetect 检测源语言，验证前缀格式正确
+        result = await plugin._translate_message(event, "Hello world", rule)
+        m = re.match(r'^\(从(.+?)翻译\)', result)
+        self.assertIsNotNone(m, f"结果 '{result}' 应匹配 (从xxx翻译) 格式")
+        self.assertIsNotNone(m.group(1), "应检测到源语言")
+        self.assertIn("Bonjour le monde", result)
 
-        self.assertEqual(result, "(从en翻译)Hello")
+        # 验证 source_language 占位符被正确替换
+        prompt = plugin._call_llm.call_args[1]["prompt"]
+        self.assertNotIn("{source_language}", prompt)
 
-    async def test_translation_parses_empty_bracket_fallback(self):
-        """验证 LLM 未按 [code] 格式输出时使用 (翻译) fallback"""
+    async def test_translation_uses_rule_source_language_override(self):
+        """验证规则中手动指定 source_language 时优先使用"""
         plugin = object.__new__(MsgTransfer)
-        plugin._call_llm = AsyncMock(return_value="Hello")
+        plugin._call_llm = AsyncMock(return_value="Hola")
         plugin.plugin_config = {
             "llm_translation": {
                 "enabled": True,
-                "system_prompt": "Translate into {target_language}: {source_text}",
+                "system_prompt": "Translate from {source_language} to {target_language}: {source_text}",
             }
         }
         event = SimpleNamespace(
@@ -615,12 +625,18 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
         rule = {
             "source_umo": "discord:ChannelMessage:1",
             "target_umo": "aiocqhttp:GroupMessage:2",
-            "translation": {"enabled": True, "target_language": "English"},
+            "translation": {
+                "enabled": True,
+                "target_language": "Spanish",
+                "source_language": "English",
+            },
         }
 
-        result = await plugin._translate_message(event, "你好", rule)
+        result = await plugin._translate_message(event, "Hello", rule)
 
-        self.assertEqual(result, "(翻译)Hello")
+        self.assertEqual(result, "(从English翻译)Hola")
+        prompt = plugin._call_llm.call_args[1]["prompt"]
+        self.assertIn("Translate from English to Spanish: Hello", prompt)
 
     async def test_translation_empty_text_returns_none(self):
         plugin = object.__new__(MsgTransfer)
@@ -662,7 +678,8 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
 
         result = await plugin._translate_message(event, "原始文本", rule)
 
-        self.assertEqual(result, "(翻译)Translated text")
+        # langdetect 检测 "原始文本" 的实际结果（可能因环境不同略有差异）
+        self.assertIn("翻译)Translated text", result)
         plugin._call_llm.assert_awaited_once_with(
             prompt="Translate into English: 原始文本",
             cfg={

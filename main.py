@@ -33,6 +33,25 @@ except ImportError:
     _AsyncOpenAI = None
     _OpenAIError = None
 
+try:
+    from langdetect import detect as _detect_lang
+except ImportError:
+    _detect_lang = None
+
+# langdetect ISO 639-1 → Hy-MT2 英文全称映射
+LANG_CODE_MAP = {
+    "zh": "Chinese", "zh-cn": "Chinese", "zh-tw": "Traditional Chinese",
+    "en": "English", "fr": "French", "pt": "Portuguese", "es": "Spanish",
+    "ja": "Japanese", "tr": "Turkish", "ru": "Russian", "ar": "Arabic",
+    "ko": "Korean", "th": "Thai", "it": "Italian", "de": "German",
+    "vi": "Vietnamese", "ms": "Malay", "id": "Indonesian", "tl": "Filipino",
+    "hi": "Hindi", "pl": "Polish", "cs": "Czech", "nl": "Dutch",
+    "km": "Khmer", "my": "Burmese", "fa": "Persian", "gu": "Gujarati",
+    "ur": "Urdu", "te": "Telugu", "mr": "Marathi", "he": "Hebrew",
+    "bn": "Bengali", "ta": "Tamil", "uk": "Ukrainian", "bo": "Tibetan",
+    "kk": "Kazakh", "mn": "Mongolian", "ug": "Uyghur", "yue": "Cantonese",
+}
+
 if _OpenAIError is None:
     llm_provider_error_types = (asyncio.TimeoutError, aiohttp.ClientError, OSError, ValueError, RuntimeError)
 else:
@@ -910,7 +929,7 @@ class MsgTransfer(star.Star):
             "enabled": False,
             "llm_providers": [],
             "timeout_seconds": 30,
-            "system_prompt": "Translate into {target_language}. Start with [source_lang_code] then the translation. Example: [en]你好\n\n{source_text}",
+            "system_prompt": "Translate the following text from {source_language} into {target_language}. Only output the translated result, no additional explanation.\n\n{source_text}",
         }
         config = self.plugin_config or {}
         section = config.get("llm_translation", {}) if hasattr(config, "get") else {}
@@ -1305,7 +1324,7 @@ class MsgTransfer(star.Star):
         return f"msg_transfer_translate:{event.unified_msg_origin}:{time.time_ns()}"
 
     async def _translate_message(self, event: AstrMessageEvent, msg_text: str, rule: dict) -> str | None:
-        """如果启用了翻译，调用 LLM 翻译 msg_text。返回翻译文本，翻译失败或未启用则返回 None。"""
+        """如果启用了翻译，调用 LLM 翻译 msg_text。返回 (从xxx翻译)译文，翻译失败或未启用则返回 None。"""
         tl_cfg = self._get_llm_translation_config()
         if not tl_cfg.get("enabled"):
             return None
@@ -1322,15 +1341,20 @@ class MsgTransfer(star.Star):
         if not msg_text or not msg_text.strip():
             return None
 
+        # 检测源语言
+        source_language = str(rule_translation.get("source_language", "")).strip()
+        if not source_language:
+            source_language = self._detect_source_language(msg_text)
+
         try:
             prompt = template.replace("{source_text}", msg_text)
             prompt = prompt.replace("{target_language}", target_language)
+            prompt = prompt.replace("{source_language}", source_language)
         except Exception as e:
             logger.warning(f"翻译提示词模板替换失败: {e}")
             return None
 
         # 翻译模型（如 Hy-MT2）无 system_prompt 机制，指令全放 user message
-        # 将 cfg 中的 system_prompt 置空，避免作为 system message 发送
         tl_cfg["system_prompt"] = ""
 
         try:
@@ -1342,20 +1366,25 @@ class MsgTransfer(star.Star):
                 tag="翻译",
             )
             if response_text and response_text.strip():
-                raw = response_text.strip()
-                # 尝试解析 [lang_code] 前缀
-                match = re.match(r'^\[([a-zA-Z_-]+)\]\s*(.*)', raw, flags=re.S)
-                if match:
-                    src_code = match.group(1).strip()
-                    translation = match.group(2).strip()
-                    if translation:
-                        return f"(从{src_code}翻译){translation}"
-                # fallback: 模型未按格式输出，直接返回
-                return f"(翻译){raw}"
+                return f"(从{source_language}翻译){response_text.strip()}"
             return None
         except llm_provider_error_types as e:
             logger.warning(f"LLM 翻译失败: {e}")
             return None
+
+    @staticmethod
+    def _detect_source_language(text: str) -> str:
+        """使用 langdetect 检测文本语言，返回 Hy-MT2 兼容的英文全称。检测失败返回空字符串。"""
+        if not text or not text.strip():
+            return ""
+        if _detect_lang is None:
+            return ""
+        try:
+            code = _detect_lang(text)
+            code = code.lower()
+            return LANG_CODE_MAP.get(code, "")
+        except Exception:
+            return ""
 
     async def _passes_llm_safety_check(self, event: AstrMessageEvent, msg_text: str) -> tuple[bool, str]:
         """仅用于 Discord→QQ 转发前的 LLM 内容安全筛查"""

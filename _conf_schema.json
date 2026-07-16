@@ -260,9 +260,9 @@
         }
       },
       "system_prompt": {
-        "description": "翻译指令模板。可用占位符：{source_text}、{target_language}。",
+        "description": "翻译指令模板。可用占位符：{source_text}、{target_language}、{source_language}。",
         "type": "text",
-        "default": "Translate into {target_language}. Start with [source_lang_code] then the translation. Example: [en]你好\n\n{source_text}"
+        "default": "Translate the following text from {source_language} into {target_language}. Only output the translated result, no additional explanation.\n\n{source_text}"
       }
     }
   },
@@ -301,6 +301,11 @@
                 "type": "string",
                 "default": "Chinese",
                 "hint": "Chinese/English/French/Portuguese/Spanish/Japanese/Turkish/Russian/Arabic/Korean/Thai/Italian/German/Vietnamese/Malay/Indonesian/Filipino/Hindi/Traditional Chinese/Polish/Czech/Dutch/Khmer/Burmese/Persian/Gujarati/Urdu/Telugu/Marathi/Hebrew/Bengali/Tamil/Ukrainian/Tibetan/Kazakh/Mongolian/Uyghur/Cantonese"
+              },
+              "source_language": {
+                "description": "源语言（可选，留空则自动检测）。使用语言全称，如 English、中文。",
+                "type": "string",
+                "default": ""
               }
             }
           }
