@@ -138,6 +138,134 @@
       }
     }
   },
+  "llm_translation": {
+    "description": "消息翻译 LLM 配置（支持 Hy-MT2、GPT 等翻译模型）",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用 LLM 翻译功能",
+        "type": "bool",
+        "default": false
+      },
+      "llm_providers": {
+        "description": "LLM 供应商列表（按顺序依次尝试，第一个成功的即返回翻译结果）。可在 Dashboard 中动态增删排序。",
+        "type": "template_list",
+        "default": [],
+        "templates": {
+          "openai_compatible": {
+            "name": "OpenAI 兼容",
+            "description": "适用于任何 OpenAI 格式兼容的 API（如 Hy-MT2、GPT、DeepSeek、GLM、通义千问等）",
+            "items": {
+              "name": {
+                "description": "供应商别名（仅用于日志标识和区分）",
+                "type": "string",
+                "default": "OpenAI API"
+              },
+              "api_key": {
+                "description": "API Key",
+                "type": "string",
+                "default": ""
+              },
+              "base_url": {
+                "description": "API 地址",
+                "type": "string",
+                "default": "",
+                "hint": "例如：http://localhost:8080"
+              },
+              "model": {
+                "description": "模型名（留空则使用默认模型）",
+                "type": "string",
+                "default": "",
+                "hint": "例如：Hy-MT2-1.8B、gpt-4o、deepseek-chat"
+              }
+            }
+          },
+          "responses_api": {
+            "name": "OpenAI Responses API",
+            "description": "使用 OpenAI Responses API 的供应商（支持官方 OpenAI 及兼容 Responses API 的服务）",
+            "items": {
+              "name": {
+                "description": "供应商别名（仅用于日志标识和区分）",
+                "type": "string",
+                "default": "OpenAI Responses API"
+              },
+              "api_key": {
+                "description": "API Key",
+                "type": "string",
+                "default": ""
+              },
+              "base_url": {
+                "description": "API 地址",
+                "type": "string",
+                "default": "https://api.openai.com",
+                "hint": "例如：https://api.openai.com；插件会自动追加 /v1/responses"
+              },
+              "model": {
+                "description": "模型名（留空则使用默认模型）",
+                "type": "string",
+                "default": "",
+                "hint": "例如：gpt-4o、gpt-5"
+              }
+            }
+          },
+          "astrbot_provider": {
+            "name": "AstrBot 当前 Provider",
+            "description": "复用 AstrBot 当前会话配置的 LLM Provider（不需要填写 API Key 等额外信息）",
+            "items": {
+              "name": {
+                "description": "供应商别名（仅用于日志标识）",
+                "type": "string",
+                "default": "AstrBot Provider"
+              }
+            }
+          },
+          "modelscope": {
+            "name": "ModelScope",
+            "description": "ModelScope 推理 API（https://api-inference.modelscope.cn），OpenAI 格式兼容，支持 Qwen、Llama、DeepSeek 等模型",
+            "items": {
+              "name": {
+                "description": "供应商别名（仅用于日志标识）",
+                "type": "string",
+                "default": "ModelScope"
+              },
+              "api_key": {
+                "description": "ModelScope API Token",
+                "type": "string",
+                "default": ""
+              },
+              "base_url": {
+                "description": "API 地址",
+                "type": "string",
+                "default": "https://api-inference.modelscope.cn",
+                "hint": "一般无需修改，插件会自动追加 /v1/chat/completions"
+              },
+              "model": {
+                "description": "模型名",
+                "type": "string",
+                "default": "",
+                "hint": "例如：Qwen/Qwen2.5-72B-Instruct、deepseek-ai/DeepSeek-V3"
+              }
+            }
+          }
+        }
+      },
+      "timeout_seconds": {
+        "description": "翻译超时时间（秒）",
+        "type": "int",
+        "default": 30,
+        "slider": {
+          "min": 3,
+          "max": 120,
+          "step": 1
+        }
+      },
+      "system_prompt": {
+        "description": "翻译指令模板。{source_text} 会被替换为待翻译原文，{source_language} 和 {target_language} 会被替换为语言全称。注意：因 Hy-MT2 等翻译模型无 system_prompt 机制，此模板将放入 user message 发送。",
+        "type": "text",
+        "default": "Translate the following text into {target_language}. Note that you should only output the translated result without any additional explanation:\n\n{source_text}"
+      }
+    }
+  },
   "forward_rules": {
     "description": "消息转发规则。每条规则将一个源会话的消息转发到一个目标会话，可在 Dashboard 中动态增删。",
     "type": "template_list",
@@ -158,6 +286,29 @@
             "type": "string",
             "default": "",
             "hint": "例如：discord:ChannelMessage:987654"
+          },
+          "translation": {
+            "description": "翻译设置（可选配置）",
+            "type": "object",
+            "items": {
+              "enabled": {
+                "description": "对此规则启用 LLM 翻译",
+                "type": "bool",
+                "default": false
+              },
+              "target_language": {
+                "description": "目标语言（使用语言全称，如 English、中文、日本語、한국어）",
+                "type": "string",
+                "default": "中文",
+                "hint": "Hy-MT2 支持：Chinese/English/French/Portuguese/Spanish/Japanese/Turkish/Russian/Arabic/Korean/Thai/Italian/German/Vietnamese/Malay/Indonesian/Filipino/Hindi/Traditional Chinese/Polish/Czech/Dutch/Khmer/Burmese/Persian/Gujarati/Urdu/Telugu/Marathi/Hebrew/Bengali/Tamil/Ukrainian/Tibetan/Kazakh/Mongolian/Uyghur/Cantonese"
+              },
+              "source_language": {
+                "description": "源语言（可选，留空则自动检测。使用语言全称）",
+                "type": "string",
+                "default": "",
+                "hint": "如 Auto（自动检测）、English、中文"
+              }
+            }
           }
         }
       }

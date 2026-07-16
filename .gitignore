@@ -210,3 +210,4 @@ data/cmd_config.json
 data/data_v3.db
 .opencode/
 .omo/
+.zcode/

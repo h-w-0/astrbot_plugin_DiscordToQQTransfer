@@ -396,9 +396,22 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
                 "modelscope",
             },
         )
+        # 验证新增的翻译配置段
+        translation_schema = schema["llm_translation"]
+        self.assertEqual(translation_schema["type"], "object")
+        self.assertIn("enabled", translation_schema["items"])
+        self.assertIn("llm_providers", translation_schema["items"])
+        self.assertIn("timeout_seconds", translation_schema["items"])
+        self.assertIn("system_prompt", translation_schema["items"])
+        # 验证翻译供应商模板与安全筛查一致
+        tl_providers = translation_schema["items"]["llm_providers"]
+        self.assertEqual(tl_providers["type"], "template_list")
+        self.assertEqual(set(tl_providers["templates"]), set(providers["templates"]))
+        # 验证转发规则模板含 translation 字段
         forward_rules = schema["forward_rules"]
         self.assertEqual(forward_rules["type"], "template_list")
         self.assertEqual(set(forward_rules["templates"]), {"forward_rule"})
+        self.assertIn("translation", forward_rules["templates"]["forward_rule"]["items"])
 
     def test_config_forward_rules_are_normalized(self):
         plugin = object.__new__(MsgTransfer)
@@ -430,6 +443,7 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
                 "config-1": {
                     "source_umo": "aiocqhttp:GroupMessage:123456",
                     "target_umo": "discord:ChannelMessage:987654",
+                    "translation": {},
                 }
             },
         )
@@ -471,10 +485,12 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
                 "config-1": {
                     "source_umo": "aiocqhttp:GroupMessage:123456",
                     "target_umo": "discord:ChannelMessage:987654",
+                    "translation": {},
                 },
                 "config-2": {
                     "source_umo": "aiocqhttp:GroupMessage:123456",
                     "target_umo": "discord:ChannelMessage:111111",
+                    "translation": {},
                 },
                 "2": {
                     "source_umo": "aiocqhttp:GroupMessage:123456",
@@ -482,6 +498,245 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
                 },
             },
         )
+
+
+    # ------------------------------------------------------------------ #
+    # 翻译功能测试
+    # ------------------------------------------------------------------ #
+
+    async def test_translation_disabled_when_top_level_off(self):
+        plugin = object.__new__(MsgTransfer)
+        plugin.plugin_config = {
+            "llm_translation": {
+                "enabled": False,
+            }
+        }
+        event = SimpleNamespace(message_obj=SimpleNamespace(message_id="t1"))
+        rule = {
+            "source_umo": "discord:ChannelMessage:1",
+            "target_umo": "aiocqhttp:GroupMessage:2",
+            "translation": {"enabled": True, "target_language": "English"},
+        }
+
+        result = await plugin._translate_message(event, "你好", rule)
+
+        self.assertIsNone(result)
+
+    async def test_translation_disabled_when_rule_level_off(self):
+        plugin = object.__new__(MsgTransfer)
+        plugin.plugin_config = {
+            "llm_translation": {
+                "enabled": True,
+                "system_prompt": "Translate into {target_language}: {source_text}",
+            }
+        }
+        event = SimpleNamespace(message_obj=SimpleNamespace(message_id="t2"))
+        rule = {
+            "source_umo": "discord:ChannelMessage:1",
+            "target_umo": "aiocqhttp:GroupMessage:2",
+            "translation": {"enabled": False, "target_language": "English"},
+        }
+
+        result = await plugin._translate_message(event, "你好", rule)
+
+        self.assertIsNone(result)
+
+    async def test_translation_formats_prompt_correctly(self):
+        plugin = object.__new__(MsgTransfer)
+        plugin._call_llm = AsyncMock(return_value="Hello")
+        plugin.plugin_config = {
+            "llm_translation": {
+                "enabled": True,
+                "system_prompt": "Translate into {target_language}: {source_text}",
+            }
+        }
+        event = SimpleNamespace(
+            message_obj=SimpleNamespace(message_id="t3"),
+            unified_msg_origin="discord:channel:1",
+        )
+        rule = {
+            "source_umo": "discord:ChannelMessage:1",
+            "target_umo": "aiocqhttp:GroupMessage:2",
+            "translation": {"enabled": True, "target_language": "English"},
+        }
+
+        result = await plugin._translate_message(event, "你好", rule)
+
+        self.assertEqual(result, "Hello")
+        plugin._call_llm.assert_awaited_once()
+        call_kwargs = plugin._call_llm.call_args[1]
+        self.assertIn("你好", call_kwargs["prompt"])
+        self.assertIn("English", call_kwargs["prompt"])
+        self.assertEqual(call_kwargs["tag"], "翻译")
+        # 验证 system_prompt 被清空（Hy-MT2 兼容）
+        self.assertEqual(call_kwargs["cfg"]["system_prompt"], "")
+
+    async def test_translation_formats_with_source_language(self):
+        plugin = object.__new__(MsgTransfer)
+        plugin._call_llm = AsyncMock(return_value="Hello")
+        plugin.plugin_config = {
+            "llm_translation": {
+                "enabled": True,
+                "system_prompt": "Translate {source_language} to {target_language}: {source_text}",
+            }
+        }
+        event = SimpleNamespace(
+            message_obj=SimpleNamespace(message_id="t4"),
+            unified_msg_origin="discord:channel:1",
+        )
+        rule = {
+            "source_umo": "discord:ChannelMessage:1",
+            "target_umo": "aiocqhttp:GroupMessage:2",
+            "translation": {
+                "enabled": True,
+                "target_language": "English",
+                "source_language": "Chinese",
+            },
+        }
+
+        result = await plugin._translate_message(event, "你好", rule)
+
+        self.assertEqual(result, "Hello")
+        prompt = plugin._call_llm.call_args[1]["prompt"]
+        self.assertIn("Chinese", prompt)
+        self.assertIn("English", prompt)
+        self.assertIn("你好", prompt)
+
+    async def test_translation_empty_text_returns_none(self):
+        plugin = object.__new__(MsgTransfer)
+        plugin.plugin_config = {
+            "llm_translation": {
+                "enabled": True,
+            }
+        }
+        event = SimpleNamespace(message_obj=SimpleNamespace(message_id="t5"))
+        rule = {
+            "source_umo": "discord:ChannelMessage:1",
+            "target_umo": "aiocqhttp:GroupMessage:2",
+            "translation": {"enabled": True},
+        }
+
+        result = await plugin._translate_message(event, "", rule)
+
+        self.assertIsNone(result)
+
+    async def test_translation_calls_llm_and_returns_result(self):
+        plugin = object.__new__(MsgTransfer)
+        plugin._call_llm = AsyncMock(return_value="Translated text")
+        plugin.plugin_config = {
+            "llm_translation": {
+                "enabled": True,
+                "system_prompt": "Translate into {target_language}: {source_text}",
+                "timeout_seconds": 15,
+            }
+        }
+        event = SimpleNamespace(
+            message_obj=SimpleNamespace(message_id="t6"),
+            unified_msg_origin="discord:channel:1",
+        )
+        rule = {
+            "source_umo": "discord:ChannelMessage:1",
+            "target_umo": "aiocqhttp:GroupMessage:2",
+            "translation": {"enabled": True, "target_language": "English"},
+        }
+
+        result = await plugin._translate_message(event, "原始文本", rule)
+
+        self.assertEqual(result, "Translated text")
+        plugin._call_llm.assert_awaited_once_with(
+            prompt="Translate into English: 原始文本",
+            cfg={
+                "enabled": True,
+                "system_prompt": "",
+                "timeout_seconds": 15,
+                "llm_providers": [],
+            },
+            session_id=plugin._build_translation_session_id(event),
+            umo="discord:channel:1",
+            tag="翻译",
+        )
+
+    async def test_translation_handles_llm_failure_gracefully(self):
+        plugin = object.__new__(MsgTransfer)
+        plugin._call_llm = AsyncMock(side_effect=asyncio.TimeoutError("超时"))
+        plugin.plugin_config = {
+            "llm_translation": {
+                "enabled": True,
+                "system_prompt": "Translate: {source_text}",
+            }
+        }
+        event = SimpleNamespace(
+            message_obj=SimpleNamespace(message_id="t7"),
+            unified_msg_origin="discord:channel:1",
+        )
+        rule = {
+            "source_umo": "discord:ChannelMessage:1",
+            "target_umo": "aiocqhttp:GroupMessage:2",
+            "translation": {"enabled": True, "target_language": "English"},
+        }
+
+        result = await plugin._translate_message(event, "text", rule)
+
+        self.assertIsNone(result)
+
+    def test_translation_config_parsed_from_rule(self):
+        plugin = object.__new__(MsgTransfer)
+        plugin.plugin_config = {
+            "forward_rules": [
+                {
+                    "source_umo": "discord:ChannelMessage:111",
+                    "target_umo": "aiocqhttp:GroupMessage:222",
+                    "translation": {
+                        "enabled": True,
+                        "target_language": "日本語",
+                        "source_language": "English",
+                    },
+                },
+                {
+                    "source_umo": "discord:ChannelMessage:333",
+                    "target_umo": "qqofficial:GroupMessage:444",
+                },
+            ]
+        }
+
+        rules = plugin._get_config_forward_rules()
+
+        self.assertEqual(
+            rules["config-1"]["translation"],
+            {
+                "enabled": True,
+                "target_language": "日本語",
+                "source_language": "English",
+            },
+        )
+        self.assertEqual(rules["config-2"]["translation"], {})
+
+    def test_get_llm_translation_config_defaults(self):
+        plugin = object.__new__(MsgTransfer)
+        plugin.plugin_config = {}
+
+        config = plugin._get_llm_translation_config()
+
+        self.assertFalse(config["enabled"])
+        self.assertEqual(config["llm_providers"], [])
+        self.assertEqual(config["timeout_seconds"], 30)
+        self.assertIn("{target_language}", config["system_prompt"])
+
+    def test_get_llm_translation_config_merges_with_defaults(self):
+        plugin = object.__new__(MsgTransfer)
+        plugin.plugin_config = {
+            "llm_translation": {
+                "enabled": True,
+                "timeout_seconds": 60,
+            }
+        }
+
+        config = plugin._get_llm_translation_config()
+
+        self.assertTrue(config["enabled"])
+        self.assertEqual(config["timeout_seconds"], 60)
+        self.assertEqual(config["llm_providers"], [])
+        self.assertIn("{target_language}", config["system_prompt"])
 
 
 if __name__ == "__main__":

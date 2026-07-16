@@ -587,6 +587,7 @@ class MsgTransfer(star.Star):
             rules[f"config-{index}"] = {
                 "source_umo": source_umo,
                 "target_umo": target_umo,
+                "translation": raw_rule.get("translation", {}),
             }
         return rules
 
@@ -788,7 +789,7 @@ class MsgTransfer(star.Star):
             target = rule["target_umo"]
             webhook_url = await self.store.get_webhook_url(target)
             if webhook_url:
-                await self._forward_with_webhook(event, target, message_chain, rid, webhook_url)
+                await self._forward_with_webhook(event, target, message_chain, rid, webhook_url, rule)
                 return
 
             # 非 webhook 目标（如 QQ），通过 AstrBot 框架发送
@@ -807,6 +808,16 @@ class MsgTransfer(star.Star):
                         logger.warning(f"转发 #{rid} 被 LLM 内容安全筛查拦截: {target}")
                         await self._reply_discord_safety_block(event, safety_reason)
                         return
+
+                # LLM 翻译（不限平台，由规则配置控制）
+                translated = await self._translate_message(event, msg_text or full_text, rule)
+                if translated:
+                    suffix = f"\n\n🌐 {translated}"
+                    if msg_text:
+                        msg_text += suffix
+                    else:
+                        msg_text = translated
+                    full_text += suffix
 
                 # Discord 端回复消息时，检测引用关系并还原 QQ 引用链
                 chain = await self._build_discord_reply_chain(event, source_platform_name, sender_name, msg_text, full_text)
@@ -897,6 +908,32 @@ class MsgTransfer(star.Star):
         )
         return merged
 
+    def _get_llm_translation_config(self) -> dict:
+        """读取 LLM 翻译配置，缺失时返回安全默认值"""
+        defaults = {
+            "enabled": False,
+            "llm_providers": [],
+            "timeout_seconds": 30,
+            "system_prompt": "Translate the following text into {target_language}. Note that you should only output the translated result without any additional explanation:\n\n{source_text}",
+        }
+        config = self.plugin_config or {}
+        section = config.get("llm_translation", {}) if hasattr(config, "get") else {}
+        if not isinstance(section, dict):
+            return defaults
+
+        merged = dict(defaults)
+        merged.update({
+            k: v
+            for k, v in section.items()
+            if k in defaults and v is not None
+        })
+        try:
+            merged["timeout_seconds"] = max(1, int(merged.get("timeout_seconds", 30)))
+        except (TypeError, ValueError):
+            merged["timeout_seconds"] = defaults["timeout_seconds"]
+        merged["enabled"] = self._coerce_config_bool(merged.get("enabled"), defaults["enabled"])
+        return merged
+
     def _get_current_llm_provider(self, umo: str | None = None):
         """获取当前会话使用的 Chat Provider"""
         getter = getattr(self.context, "get_using_provider", None)
@@ -952,12 +989,12 @@ class MsgTransfer(star.Star):
 
         payload = {
             "model": model_name or "gpt-4o",
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt},
-            ],
+            "messages": [],
             "max_tokens": 512,
         }
+        if system_prompt:
+            payload["messages"].append({"role": "system", "content": system_prompt})
+        payload["messages"].append({"role": "user", "content": prompt})
         reasoning_effort = cfg.get("reasoning_effort", "")
         if reasoning_effort:
             payload["reasoning_effort"] = reasoning_effort
@@ -1040,10 +1077,11 @@ class MsgTransfer(star.Star):
 
         request_kwargs = {
             "model": model_name or "gpt-4o",
-            "instructions": system_prompt,
             "input": prompt,
             "max_output_tokens": 512,
         }
+        if system_prompt:
+            request_kwargs["instructions"] = system_prompt
         reasoning_effort = cfg.get("reasoning_effort", "")
         if reasoning_effort:
             request_kwargs["reasoning"] = {"effort": reasoning_effort}
@@ -1074,20 +1112,21 @@ class MsgTransfer(star.Star):
             response_json = response
         return self._extract_responses_api_text(response_json, api_name)
 
-    async def _call_llm_safety(
+    async def _call_llm(
         self,
         prompt: str,
         cfg: dict,
         session_id: str,
         umo: str | None,
+        tag: str = "任务",
     ) -> str:
-        """按 llm_providers 列表顺序调用，第一个成功的供应商返回结果"""
+        """按 llm_providers 列表顺序调用，第一个成功的供应商返回结果。tag 用于日志标识（如"安全筛查"、"翻译"）。"""
         providers = cfg.get("llm_providers", [])
         if not isinstance(providers, list):
             providers = []
 
         if not providers:
-            logger.info("LLM 安全筛查未配置供应商，使用 AstrBot 当前 Provider")
+            logger.info(f"LLM {tag}未配置供应商，使用 AstrBot 当前 Provider")
             return await asyncio.wait_for(
                 self._call_astrbot_safety_provider(
                     prompt,
@@ -1108,7 +1147,7 @@ class MsgTransfer(star.Star):
             provider_name = provider.get("name", "Unknown")
             try:
                 if template == "astrbot_provider":
-                    logger.info(f"尝试 AstrBot Provider「{provider_name}」...")
+                    logger.info(f"{tag}: 尝试 AstrBot Provider「{provider_name}」...")
                     result = await asyncio.wait_for(
                         self._call_astrbot_safety_provider(
                             prompt,
@@ -1119,7 +1158,7 @@ class MsgTransfer(star.Star):
                         timeout=timeout_seconds,
                     )
                 elif template == "responses_api":
-                    logger.info(f"尝试 OpenAI Responses API 供应商「{provider_name}」...")
+                    logger.info(f"{tag}: 尝试 OpenAI Responses API 供应商「{provider_name}」...")
                     result = await asyncio.wait_for(
                         self._call_responses_api_safety_provider(
                             prompt,
@@ -1131,7 +1170,7 @@ class MsgTransfer(star.Star):
                     )
                 else:
                     provider_type = "ModelScope" if template == "modelscope" else "OpenAI 兼容"
-                    logger.info(f"尝试 {provider_type} 供应商「{provider_name}」...")
+                    logger.info(f"{tag}: 尝试 {provider_type} 供应商「{provider_name}」...")
                     result = await asyncio.wait_for(
                         self._call_openai_compatible_safety_provider(
                             prompt,
@@ -1147,13 +1186,23 @@ class MsgTransfer(star.Star):
                 return result
             except Exception as exc:
                 last_exception = exc
-                logger.warning(f"LLM 安全筛查供应商「{provider_name}」调用失败: {exc}")
+                logger.warning(f"LLM {tag}供应商「{provider_name}」调用失败: {exc}")
 
         if last_exception:
             raise RuntimeError(
                 f"所有供应商均不可用（共 {len(providers)} 个）"
             ) from last_exception
         raise RuntimeError("没有可用的供应商配置")
+
+    async def _call_llm_safety(
+        self,
+        prompt: str,
+        cfg: dict,
+        session_id: str,
+        umo: str | None,
+    ) -> str:
+        """按 llm_providers 列表顺序调用，第一个成功的供应商返回审核结果"""
+        return await self._call_llm(prompt, cfg, session_id, umo, tag="安全筛查")
 
     @staticmethod
     def _is_qq_target(target_umo: str) -> bool:
@@ -1250,6 +1299,61 @@ class MsgTransfer(star.Star):
         if message_id:
             return f"msg_transfer_safety:{message_id}"
         return f"msg_transfer_safety:{event.unified_msg_origin}:{time.time_ns()}"
+
+    @staticmethod
+    def _build_translation_session_id(event: AstrMessageEvent) -> str:
+        """为每条翻译消息使用独立会话"""
+        message_id = getattr(event.message_obj, "message_id", None)
+        if message_id:
+            return f"msg_transfer_translate:{message_id}"
+        return f"msg_transfer_translate:{event.unified_msg_origin}:{time.time_ns()}"
+
+    async def _translate_message(self, event: AstrMessageEvent, msg_text: str, rule: dict) -> str | None:
+        """如果启用了翻译，调用 LLM 翻译 msg_text。返回翻译文本，翻译失败或未启用则返回 None。"""
+        tl_cfg = self._get_llm_translation_config()
+        if not tl_cfg.get("enabled"):
+            return None
+
+        rule_translation = rule.get("translation", {})
+        if not isinstance(rule_translation, dict):
+            return None
+        if not self._coerce_config_bool(rule_translation.get("enabled"), False):
+            return None
+
+        target_language = str(rule_translation.get("target_language", "中文")).strip()
+        source_language = str(rule_translation.get("source_language", "")).strip()
+        template = str(tl_cfg.get("system_prompt", ""))
+
+        if not msg_text or not msg_text.strip():
+            return None
+
+        try:
+            prompt = template.replace("{source_text}", msg_text)
+            prompt = prompt.replace("{target_language}", target_language)
+            if source_language:
+                prompt = prompt.replace("{source_language}", source_language)
+        except Exception as e:
+            logger.warning(f"翻译提示词模板替换失败: {e}")
+            return None
+
+        # 翻译模型（如 Hy-MT2）无 system_prompt 机制，指令全放 user message
+        # 将 cfg 中的 system_prompt 置空，避免作为 system message 发送
+        tl_cfg["system_prompt"] = ""
+
+        try:
+            response_text = await self._call_llm(
+                prompt=prompt,
+                cfg=tl_cfg,
+                session_id=self._build_translation_session_id(event),
+                umo=getattr(event, "unified_msg_origin", None),
+                tag="翻译",
+            )
+            if response_text and response_text.strip():
+                return response_text.strip()
+            return None
+        except llm_provider_error_types as e:
+            logger.warning(f"LLM 翻译失败: {e}")
+            return None
 
     async def _passes_llm_safety_check(self, event: AstrMessageEvent, msg_text: str) -> tuple[bool, str]:
         """仅用于 Discord→QQ 转发前的 LLM 内容安全筛查"""
@@ -1509,7 +1613,7 @@ class MsgTransfer(star.Star):
 
         return content
 
-    async def _forward_with_webhook(self, event: AstrMessageEvent, target_umo: str, message_chain, rule_id: str, webhook_url: str) -> bool:
+    async def _forward_with_webhook(self, event: AstrMessageEvent, target_umo: str, message_chain, rule_id: str, webhook_url: str, rule: dict = None) -> bool:
         try:
             sender_name = event.get_sender_name()
             sender_id = event.get_sender_id()
@@ -1536,6 +1640,14 @@ class MsgTransfer(star.Star):
             image_urls = DiscordWebhookManager.extract_images(new_chain)
             local_images = DiscordWebhookManager.extract_local_image_paths(new_chain)
             raw_content = DiscordWebhookManager.format_message_content(new_chain, skip_images=True)
+
+            # LLM 翻译（webhook 路径，QQ→Discord 等场景）
+            translated = None
+            if rule is not None:
+                translated = await self._translate_message(event, raw_content, rule)
+            if translated:
+                raw_content = f"{raw_content}\n\n🌐 {translated}"
+
             content = self._build_webhook_quote(raw_content, reply_to_discord_id, jump_url, quote_text, quote_sender)
             embeds = [{"image": {"url": url}} for url in image_urls[:10]]  # Discord 最多 10 个 embed
             # v4.26+ 本地图片通过 multipart 上传，不再依赖 HTTP embed
