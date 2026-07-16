@@ -567,40 +567,12 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
         call_kwargs = plugin._call_llm.call_args[1]
         self.assertIn("你好", call_kwargs["prompt"])
         self.assertIn("English", call_kwargs["prompt"])
+        # 验证 {source_text} 和 {target_language} 占位符被替换
+        self.assertNotIn("{source_text}", call_kwargs["prompt"])
+        self.assertNotIn("{target_language}", call_kwargs["prompt"])
         self.assertEqual(call_kwargs["tag"], "翻译")
         # 验证 system_prompt 被清空（Hy-MT2 兼容）
         self.assertEqual(call_kwargs["cfg"]["system_prompt"], "")
-
-    async def test_translation_formats_with_source_language(self):
-        plugin = object.__new__(MsgTransfer)
-        plugin._call_llm = AsyncMock(return_value="Hello")
-        plugin.plugin_config = {
-            "llm_translation": {
-                "enabled": True,
-                "system_prompt": "Translate {source_language} to {target_language}: {source_text}",
-            }
-        }
-        event = SimpleNamespace(
-            message_obj=SimpleNamespace(message_id="t4"),
-            unified_msg_origin="discord:channel:1",
-        )
-        rule = {
-            "source_umo": "discord:ChannelMessage:1",
-            "target_umo": "aiocqhttp:GroupMessage:2",
-            "translation": {
-                "enabled": True,
-                "target_language": "English",
-                "source_language": "Chinese",
-            },
-        }
-
-        result = await plugin._translate_message(event, "你好", rule)
-
-        self.assertEqual(result, "Hello")
-        prompt = plugin._call_llm.call_args[1]["prompt"]
-        self.assertIn("Chinese", prompt)
-        self.assertIn("English", prompt)
-        self.assertIn("你好", prompt)
 
     async def test_translation_empty_text_returns_none(self):
         plugin = object.__new__(MsgTransfer)
@@ -689,7 +661,6 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
                     "translation": {
                         "enabled": True,
                         "target_language": "日本語",
-                        "source_language": "English",
                     },
                 },
                 {
@@ -706,7 +677,6 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
             {
                 "enabled": True,
                 "target_language": "日本語",
-                "source_language": "English",
             },
         )
         self.assertEqual(rules["config-2"]["translation"], {})

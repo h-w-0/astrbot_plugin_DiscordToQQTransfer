@@ -211,4 +211,4 @@ data/data_v3.db
 .opencode/
 .omo/
 .zcode/
-.data/
+data/*

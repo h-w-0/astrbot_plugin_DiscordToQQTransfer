@@ -812,14 +812,8 @@ class MsgTransfer(star.Star):
                 # LLM 翻译（不限平台，由规则配置控制）
                 translated = await self._translate_message(event, msg_text or full_text, rule)
                 if translated:
-                    rule_translation = rule.get("translation", {})
-                    if not isinstance(rule_translation, dict):
-                        rule_translation = {}
-                    src_lang = str(rule_translation.get("source_language", "")).strip()
-                    prefix = f"(从{src_lang}翻译)" if src_lang else "(翻译)"
-                    translated_text = f"{prefix}{translated}"
-                    msg_text = translated_text
-                    full_text = f"[转发] {sender_name} ({source_platform_name})​: {translated_text}"
+                    msg_text = translated
+                    full_text = f"[转发] {sender_name} ({source_platform_name})​: {translated}"
 
                 # Discord 端回复消息时，检测引用关系并还原 QQ 引用链
                 chain = await self._build_discord_reply_chain(event, source_platform_name, sender_name, msg_text, full_text)
@@ -916,7 +910,7 @@ class MsgTransfer(star.Star):
             "enabled": False,
             "llm_providers": [],
             "timeout_seconds": 30,
-            "system_prompt": "Translate the following text into {target_language}. Note that you should only output the translated result without any additional explanation:\n\n{source_text}",
+            "system_prompt": "Translate the following text into {target_language}. First detect the source language, then translate. Output format: (从<source_language>翻译)<translated_text>. Only output the result, no additional explanation.\n\n{source_text}",
         }
         config = self.plugin_config or {}
         section = config.get("llm_translation", {}) if hasattr(config, "get") else {}
@@ -1322,8 +1316,7 @@ class MsgTransfer(star.Star):
         if not self._coerce_config_bool(rule_translation.get("enabled"), False):
             return None
 
-        target_language = str(rule_translation.get("target_language", "中文")).strip()
-        source_language = str(rule_translation.get("source_language", "")).strip()
+        target_language = str(rule_translation.get("target_language", "Chinese")).strip()
         template = str(tl_cfg.get("system_prompt", ""))
 
         if not msg_text or not msg_text.strip():
@@ -1332,8 +1325,6 @@ class MsgTransfer(star.Star):
         try:
             prompt = template.replace("{source_text}", msg_text)
             prompt = prompt.replace("{target_language}", target_language)
-            if source_language:
-                prompt = prompt.replace("{source_language}", source_language)
         except Exception as e:
             logger.warning(f"翻译提示词模板替换失败: {e}")
             return None
@@ -1648,12 +1639,7 @@ class MsgTransfer(star.Star):
             if rule is not None:
                 translated = await self._translate_message(event, raw_content, rule)
             if translated:
-                rule_translation = rule.get("translation", {})
-                if not isinstance(rule_translation, dict):
-                    rule_translation = {}
-                src_lang = str(rule_translation.get("source_language", "")).strip()
-                prefix = f"(从{src_lang}翻译)" if src_lang else "(翻译)"
-                raw_content = f"{prefix}{translated}"
+                raw_content = translated
 
             content = self._build_webhook_quote(raw_content, reply_to_discord_id, jump_url, quote_text, quote_sender)
             embeds = [{"image": {"url": url}} for url in image_urls[:10]]  # Discord 最多 10 个 embed
