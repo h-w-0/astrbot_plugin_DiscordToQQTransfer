@@ -812,12 +812,14 @@ class MsgTransfer(star.Star):
                 # LLM 翻译（不限平台，由规则配置控制）
                 translated = await self._translate_message(event, msg_text or full_text, rule)
                 if translated:
-                    suffix = f"\n\n🌐 {translated}"
-                    if msg_text:
-                        msg_text += suffix
-                    else:
-                        msg_text = translated
-                    full_text += suffix
+                    rule_translation = rule.get("translation", {})
+                    if not isinstance(rule_translation, dict):
+                        rule_translation = {}
+                    src_lang = str(rule_translation.get("source_language", "")).strip()
+                    prefix = f"(从{src_lang}翻译)" if src_lang else "(翻译)"
+                    translated_text = f"{prefix}{translated}"
+                    msg_text = translated_text
+                    full_text = f"[转发] {sender_name} ({source_platform_name})​: {translated_text}"
 
                 # Discord 端回复消息时，检测引用关系并还原 QQ 引用链
                 chain = await self._build_discord_reply_chain(event, source_platform_name, sender_name, msg_text, full_text)
@@ -1646,7 +1648,12 @@ class MsgTransfer(star.Star):
             if rule is not None:
                 translated = await self._translate_message(event, raw_content, rule)
             if translated:
-                raw_content = f"{raw_content}\n\n🌐 {translated}"
+                rule_translation = rule.get("translation", {})
+                if not isinstance(rule_translation, dict):
+                    rule_translation = {}
+                src_lang = str(rule_translation.get("source_language", "")).strip()
+                prefix = f"(从{src_lang}翻译)" if src_lang else "(翻译)"
+                raw_content = f"{prefix}{translated}"
 
             content = self._build_webhook_quote(raw_content, reply_to_discord_id, jump_url, quote_text, quote_sender)
             embeds = [{"image": {"url": url}} for url in image_urls[:10]]  # Discord 最多 10 个 embed
