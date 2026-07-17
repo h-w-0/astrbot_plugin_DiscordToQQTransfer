@@ -608,6 +608,30 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
         prompt = plugin._call_llm.call_args[1]["prompt"]
         self.assertNotIn("{source_language}", prompt)
 
+    def test_source_language_detection_prefers_distinctive_scripts(self):
+        """短 CJK 文本使用文字系统判断，避免 langdetect 误判"""
+        cases = {
+            "不知道": "Chinese",
+            "原始文本": "Chinese",
+            "繁體中文": "Chinese",
+            "你好 hello": "Chinese",
+            "日本語です": "Japanese",
+            "おはよう": "Japanese",
+            "한글입니다": "Korean",
+        }
+
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(MsgTransfer._detect_source_language(text), expected)
+
+    def test_source_language_detection_falls_back_to_langdetect(self):
+        """没有明确文字系统时继续使用 langdetect"""
+        with patch.object(module, "_detect_lang", return_value="fr") as detect_lang:
+            result = MsgTransfer._detect_source_language("Bonjour tout le monde")
+
+        self.assertEqual(result, "French")
+        detect_lang.assert_called_once_with("Bonjour tout le monde")
+
     async def test_translation_uses_rule_source_language_override(self):
         """验证规则中手动指定 source_language 时优先使用"""
         plugin = object.__new__(MsgTransfer)

@@ -52,6 +52,12 @@ LANG_CODE_MAP = {
     "kk": "Kazakh", "mn": "Mongolian", "ug": "Uyghur", "yue": "Cantonese",
 }
 
+# Distinctive writing systems are more reliable than statistical detection for
+# short CJK messages.
+_HAN_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+_KANA_RE = re.compile(r"[\u3040-\u30ff\uff66-\uff9f]")
+_HANGUL_RE = re.compile(r"[\u1100-\u11ff\u3130-\u318f\ua960-\ua97f\uac00-\ud7ff]")
+
 if _OpenAIError is None:
     llm_provider_error_types = (asyncio.TimeoutError, aiohttp.ClientError, OSError, ValueError, RuntimeError)
 else:
@@ -1374,9 +1380,19 @@ class MsgTransfer(star.Star):
 
     @staticmethod
     def _detect_source_language(text: str) -> str:
-        """使用 langdetect 检测文本语言，返回 Hy-MT2 兼容的英文全称。检测失败返回空字符串。"""
+        """优先按文字系统识别短文本，再用 langdetect 检测其他语言。"""
         if not text or not text.strip():
             return ""
+
+        # Han characters alone are Chinese; kana distinguishes Japanese from
+        # Chinese text that also contains Han characters.
+        if _KANA_RE.search(text):
+            return "Japanese"
+        if _HANGUL_RE.search(text):
+            return "Korean"
+        if _HAN_RE.search(text):
+            return "Chinese"
+
         if _detect_lang is None:
             return ""
         try:
