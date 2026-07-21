@@ -1372,7 +1372,8 @@ class MsgTransfer(star.Star):
                 tag="翻译",
             )
             if response_text and response_text.strip():
-                return f"(从{source_language}翻译){response_text.strip()}"
+                prefix = self._format_translation_prefix(source_language, target_language)
+                return f"{prefix}{response_text.strip()}"
             return None
         except llm_provider_error_types as e:
             logger.warning(f"LLM 翻译失败: {e}")
@@ -1401,6 +1402,43 @@ class MsgTransfer(star.Star):
             return LANG_CODE_MAP.get(code, "")
         except Exception:
             return ""
+
+    @staticmethod
+    def _format_translation_prefix(source_language: str, target_language: str) -> str:
+        """根据目标语言在本地生成中英文翻译前缀。"""
+        target_key = str(target_language or "").strip().lower().replace("_", "-")
+        chinese_target = target_key in {
+            "chinese",
+            "中文",
+            "zh",
+            "zh-cn",
+            "zh-tw",
+            "简体中文",
+            "繁体中文",
+            "繁體中文",
+        }
+
+        source_key = str(source_language or "").strip().lower().replace("_", "-")
+        if source_key in {
+            "chinese",
+            "中文",
+            "zh",
+            "zh-cn",
+            "zh-tw",
+            "简体中文",
+            "繁体中文",
+            "繁體中文",
+            "traditional chinese",
+        }:
+            source_name = "中文" if chinese_target else "Chinese"
+        elif source_key in {"english", "英语", "英文", "en", "en-us", "en-gb"}:
+            source_name = "英文" if chinese_target else "English"
+        else:
+            source_name = str(source_language or "").strip() or ("中文" if chinese_target else "Chinese")
+
+        if chinese_target:
+            return f"(从{source_name}翻译)"
+        return f"(Translated from {source_name})"
 
     async def _passes_llm_safety_check(self, event: AstrMessageEvent, msg_text: str) -> tuple[bool, str]:
         """仅用于 Discord→QQ 转发前的 LLM 内容安全筛查"""
