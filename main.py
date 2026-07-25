@@ -730,6 +730,18 @@ class MsgTransfer(star.Star):
                 return False
         return default
 
+    def _should_log_llm_response(self) -> bool:
+        """读取是否输出 LLM 最终返回内容的调试开关。"""
+        config = getattr(self, "plugin_config", None) or {}
+        if not hasattr(config, "get"):
+            return False
+        return self._coerce_config_bool(config.get("debug_log_llm_response"), False)
+
+    def _log_llm_response(self, tag: str, result: str) -> None:
+        """按配置输出 LLM 最终返回内容，便于排查审核和翻译问题。"""
+        if self._should_log_llm_response():
+            logger.info(f"LLM {tag}返回内容: {result}")
+
     def _get_llm_safety_config(self) -> dict:
         """读取转发内容审核的 LLM 公共配置，缺失时返回安全默认值"""
         defaults = {
@@ -979,7 +991,7 @@ class MsgTransfer(star.Star):
 
         if not providers:
             logger.info(f"LLM {tag}未配置供应商，使用 AstrBot 当前 Provider")
-            return await asyncio.wait_for(
+            result = await asyncio.wait_for(
                 self._call_astrbot_safety_provider(
                     prompt,
                     str(cfg.get("system_prompt", "")),
@@ -988,6 +1000,8 @@ class MsgTransfer(star.Star):
                 ),
                 timeout=float(cfg.get("timeout_seconds", 10)),
             )
+            self._log_llm_response(tag, result)
+            return result
 
         timeout_seconds = float(cfg.get("timeout_seconds", 10))
         last_exception = None
@@ -1035,6 +1049,7 @@ class MsgTransfer(star.Star):
 
                 if not result or not result.strip():
                     raise ValueError(f"「{provider_name}」返回内容为空")
+                self._log_llm_response(tag, result)
                 return result
             except Exception as exc:
                 last_exception = exc

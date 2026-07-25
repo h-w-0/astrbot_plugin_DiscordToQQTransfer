@@ -261,6 +261,11 @@
       }
     }
   },
+  "debug_log_llm_response": {
+    "description": "调试开关。开启后会将大模型最终返回的内容输出到日志，可能包含消息内容、翻译结果或审核理由。",
+    "type": "bool",
+    "default": false
+  },
   "forward_rules": {
     "description": "消息转发规则。每条规则将一个源会话的消息转发到一个目标会话，可在 Dashboard 中动态增删。",
     "type": "template_list",

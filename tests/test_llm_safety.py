@@ -190,6 +190,40 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(provider.calls[0]["system_prompt"], "system")
         self.assertEqual(provider.calls[0]["session_id"], "msg_transfer_safety:discord-5")
 
+    async def test_llm_response_is_logged_when_debug_switch_enabled(self):
+        plugin = object.__new__(MsgTransfer)
+        plugin.context = DummyContext(SuccessfulProvider("调试输出"))
+        plugin.plugin_config = {"debug_log_llm_response": True}
+
+        with patch.object(module.logger, "info") as log_info:
+            result = await plugin._call_llm(
+                prompt="测试提示词",
+                cfg={"llm_providers": [], "timeout_seconds": 1},
+                session_id="test-session",
+                umo="discord:channel:1",
+                tag="翻译",
+            )
+
+        self.assertEqual(result, "调试输出")
+        log_info.assert_any_call("LLM 翻译返回内容: 调试输出")
+
+    async def test_llm_response_is_not_logged_when_debug_switch_disabled(self):
+        plugin = object.__new__(MsgTransfer)
+        plugin.context = DummyContext(SuccessfulProvider("不应记录"))
+        plugin.plugin_config = {"debug_log_llm_response": "false"}
+
+        with patch.object(module.logger, "info") as log_info:
+            await plugin._call_llm(
+                prompt="测试提示词",
+                cfg={"llm_providers": [], "timeout_seconds": 1},
+                session_id="test-session",
+                umo="discord:channel:1",
+            )
+
+        self.assertFalse(
+            any("不应记录" in str(call) for call in log_info.call_args_list)
+        )
+
     async def test_astrbot_provider_template_uses_current_provider(self):
         provider = SuccessfulProvider('{"safe": false, "reason": "包含风险"}')
         plugin = object.__new__(MsgTransfer)
@@ -383,6 +417,8 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
 
     def test_schema_uses_provider_templates(self):
         schema = json.loads((REPO_ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
+        self.assertEqual(schema["debug_log_llm_response"]["type"], "bool")
+        self.assertFalse(schema["debug_log_llm_response"]["default"])
         safety_schema = schema["llm_safety_check"]
 
         self.assertNotIn("provider_id", safety_schema["items"])
