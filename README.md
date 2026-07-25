@@ -15,7 +15,7 @@
   - Discord 端引用回复时，自动还原为 Discord 原生引用 + 跳转链接。
 - **Discord Webhook 集成**：自动为 Discord 频道创建 Webhook，以发送者身份显示头像和昵称。
 - **原生 Discord @提及**：QQ → Discord 转发时，QQ @提及自动转换为 Discord 原生 `<@user_id>` 格式。
-- **可持久化存储**：转发规则、消息映射缓存自动保存，重启不丢失。
+- **可持久化存储**：Webhook 与消息映射缓存自动保存，重启不丢失。
 
 ---
 
@@ -36,30 +36,18 @@
 
 ## ⚙️ 配置
 
-转发规则可以通过 Dashboard 的 `forward_rules` 配置，也可以继续通过命令创建。
+转发规则仅通过 Dashboard 的 `forward_rules` 配置。
 
 - `forward_rules`：按 `source_umo → target_umo` 配置消息转发关系，支持动态增删。
-- 配置规则与命令创建的规则会合并执行，重复的源/目标组合只转发一次。
+- `content_safety.enabled`：仅对当前规则启用 LLM 内容审核；开启后不区分源或目标平台，均在发送前审核。
 - 配置规则的 Discord 目标会在插件启动时自动尝试创建 Webhook。
 
-如需启用 Discord → QQ 的 LLM 内容安全筛查，可在 Dashboard 配置 `llm_safety_check`：
+`llm_safety_check` 仅提供所有规则共用的 LLM 审核配置：
 
-- `enabled`：启用安全筛查。
 - `llm_providers`：按顺序尝试的供应商列表，支持 `OpenAI 兼容`、`OpenAI Responses API`、`AstrBot 当前 Provider` 和 `ModelScope`。
 - `llm_providers` 留空时使用当前会话的 AstrBot Provider。
 - `OpenAI Responses API` 供应商默认请求 `https://api.openai.com/v1/responses`，也支持填写兼容 Responses API 的自定义地址。
 - `block_on_error`：LLM 调用失败或超时时是否阻止转发。
-
----
-
-## 💬 指令列表
-
-| 指令 | 说明 | 权限 |
-|------|------|------|
-| `mt add` | 在当前会话创建转发绑定请求 | ADMIN |
-| `mt bind <code>` | 在目标会话接受绑定请求 | 任意 |
-| `mt del <rid>` | 删除指定转发规则 | ADMIN |
-| `mt list` | 列出当前会话相关的所有转发规则 | 任意 |
 
 ---
 
@@ -69,8 +57,6 @@
 
 | 文件 | 用途 |
 |------|------|
-| `rules.json` | 命令创建的转发规则（Dashboard 规则来自插件配置） |
-| `pending.json` | 待绑定的请求 |
 | `webhooks.json` | Discord Webhook URL 映射 |
 | `mappings.json` | QQ 号 → QQ 昵称映射 |
 | `msg_mapping.json` | QQ 消息 ID ↔ Discord 消息 ID 映射（含发送者信息） |
@@ -80,7 +66,7 @@
 
 ## 🔄 转发行为示例
 
-假设 QQ 群 `654321` 与 Discord 频道 `123456` 已绑定：
+假设已在 Dashboard 中配置 QQ 群 `654321` 与 Discord 频道 `123456` 的转发规则：
 
 ### QQ → Discord
 

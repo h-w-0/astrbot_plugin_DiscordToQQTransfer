@@ -143,7 +143,7 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(allowed)
         self.assertEqual(reason, "安全审核失败或超时")
 
-    async def test_string_false_enabled_disables_safety_check(self):
+    async def test_legacy_global_enabled_is_ignored(self):
         plugin = object.__new__(MsgTransfer)
         plugin.context = DummyContext()
         plugin.plugin_config = {
@@ -162,8 +162,8 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
 
         allowed, reason = await plugin._passes_llm_safety_check(event, "普通消息")
 
-        self.assertTrue(allowed)
-        self.assertEqual(reason, "")
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "安全审核失败或超时")
 
     async def test_empty_provider_list_uses_current_provider(self):
         provider = SuccessfulProvider()
@@ -386,6 +386,7 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
         safety_schema = schema["llm_safety_check"]
 
         self.assertNotIn("provider_id", safety_schema["items"])
+        self.assertNotIn("enabled", safety_schema["items"])
         providers = safety_schema["items"]["llm_providers"]
         self.assertEqual(providers["type"], "template_list")
         self.assertEqual(
@@ -408,11 +409,18 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
         tl_providers = translation_schema["items"]["llm_providers"]
         self.assertEqual(tl_providers["type"], "template_list")
         self.assertEqual(set(tl_providers["templates"]), set(providers["templates"]))
-        # 验证转发规则模板含 translation 字段
+        # 验证转发规则模板含翻译和内容审核字段
         forward_rules = schema["forward_rules"]
         self.assertEqual(forward_rules["type"], "template_list")
         self.assertEqual(set(forward_rules["templates"]), {"forward_rule"})
         self.assertIn("translation", forward_rules["templates"]["forward_rule"]["items"])
+        content_safety = forward_rules["templates"]["forward_rule"]["items"]["content_safety"]
+        self.assertEqual(content_safety["items"]["enabled"]["default"], False)
+
+    def test_command_binding_handlers_are_removed(self):
+        for handler_name in ("mt", "cmd_add", "cmd_bind", "cmd_del", "cmd_list"):
+            with self.subTest(handler_name=handler_name):
+                self.assertFalse(hasattr(MsgTransfer, handler_name))
 
     def test_config_forward_rules_are_normalized(self):
         plugin = object.__new__(MsgTransfer)
@@ -445,11 +453,12 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
                     "source_umo": "aiocqhttp:GroupMessage:123456",
                     "target_umo": "discord:ChannelMessage:987654",
                     "translation": {},
+                    "content_safety": {"enabled": False},
                 }
             },
         )
 
-    async def test_config_forward_rules_merge_with_stored_rules_without_duplicates(self):
+    async def test_config_forward_rules_are_the_only_rule_source(self):
         plugin = object.__new__(MsgTransfer)
         plugin.plugin_config = {
             "forward_rules": [
@@ -465,16 +474,7 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
         }
         plugin.store = SimpleNamespace(
             list_rules=AsyncMock(
-                return_value={
-                    "1": {
-                        "source_umo": "aiocqhttp:GroupMessage:123456",
-                        "target_umo": "discord:ChannelMessage:987654",
-                    },
-                    "2": {
-                        "source_umo": "aiocqhttp:GroupMessage:123456",
-                        "target_umo": "qq:GroupMessage:222222",
-                    },
-                }
+                side_effect=AssertionError("不应读取持久化转发规则")
             )
         )
 
@@ -487,19 +487,141 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
                     "source_umo": "aiocqhttp:GroupMessage:123456",
                     "target_umo": "discord:ChannelMessage:987654",
                     "translation": {},
+                    "content_safety": {"enabled": False},
                 },
                 "config-2": {
                     "source_umo": "aiocqhttp:GroupMessage:123456",
                     "target_umo": "discord:ChannelMessage:111111",
                     "translation": {},
-                },
-                "2": {
-                    "source_umo": "aiocqhttp:GroupMessage:123456",
-                    "target_umo": "qq:GroupMessage:222222",
+                    "content_safety": {"enabled": False},
                 },
             },
         )
+        plugin.store.list_rules.assert_not_awaited()
 
+    def test_safety_payload_is_platform_neutral(self):
+        event = SimpleNamespace(
+            message_obj=SimpleNamespace(message_id="message-1"),
+            unified_msg_origin="aiocqhttp:GroupMessage:123456",
+            get_sender_name=lambda: "tester",
+            get_sender_id=lambda: "user-1",
+        )
+
+        payload = json.loads(
+            MsgTransfer._build_llm_safety_payload(
+                event,
+                "普通消息",
+                "discord:ChannelMessage:987654",
+            )
+        )
+
+        self.assertEqual(payload["task"], "audit_message_for_forwarding")
+        self.assertNotIn("discord_message", payload)
+        self.assertEqual(payload["forwarding_message"]["source_umo"], event.unified_msg_origin)
+        self.assertEqual(payload["forwarding_message"]["target_umo"], "discord:ChannelMessage:987654")
+
+    async def test_rule_content_safety_applies_to_webhook_forwarding(self):
+        plugin = object.__new__(MsgTransfer)
+        plugin.store = SimpleNamespace(
+            update_mapping=AsyncMock(return_value=False),
+            get_webhook_url=AsyncMock(return_value="https://example.invalid/webhook"),
+        )
+        plugin._passes_llm_safety_check = AsyncMock(return_value=(True, ""))
+        plugin._forward_with_webhook = AsyncMock(return_value=True)
+        event = SimpleNamespace(
+            get_platform_name=lambda: "aiocqhttp",
+            get_sender_id=lambda: "123456",
+            get_sender_name=lambda: "tester",
+        )
+        rule = {
+            "target_umo": "discord:ChannelMessage:987654",
+            "content_safety": {"enabled": True},
+        }
+
+        await plugin._forward_single_rule(
+            event,
+            rule,
+            "config-1",
+            "aiocqhttp:GroupMessage:123456",
+            [],
+        )
+
+        plugin._passes_llm_safety_check.assert_awaited_once_with(
+            event,
+            "",
+            "discord:ChannelMessage:987654",
+        )
+        plugin._forward_with_webhook.assert_awaited_once_with(
+            event,
+            "discord:ChannelMessage:987654",
+            [],
+            "config-1",
+            "https://example.invalid/webhook",
+            rule,
+        )
+
+    async def test_rule_content_safety_blocks_before_any_send_path(self):
+        plugin = object.__new__(MsgTransfer)
+        plugin.store = SimpleNamespace(
+            get_webhook_url=AsyncMock(),
+        )
+        plugin._passes_llm_safety_check = AsyncMock(return_value=(False, "包含风险"))
+        plugin._reply_safety_block = AsyncMock()
+        plugin._forward_with_webhook = AsyncMock()
+        event = SimpleNamespace(
+            get_platform_name=lambda: "discord",
+        )
+        rule = {
+            "target_umo": "aiocqhttp:GroupMessage:987654",
+            "content_safety": {"enabled": True},
+        }
+
+        await plugin._forward_single_rule(
+            event,
+            rule,
+            "config-1",
+            "discord:ChannelMessage:123456",
+            [],
+        )
+
+        plugin._passes_llm_safety_check.assert_awaited_once_with(
+            event,
+            "",
+            "aiocqhttp:GroupMessage:987654",
+        )
+        plugin._reply_safety_block.assert_awaited_once_with(
+            event,
+            "aiocqhttp:GroupMessage:987654",
+            "包含风险",
+        )
+        plugin.store.get_webhook_url.assert_not_awaited()
+        plugin._forward_with_webhook.assert_not_awaited()
+
+    async def test_rule_content_safety_disabled_skips_check(self):
+        plugin = object.__new__(MsgTransfer)
+        plugin.store = SimpleNamespace(
+            get_webhook_url=AsyncMock(return_value="https://example.invalid/webhook"),
+        )
+        plugin._passes_llm_safety_check = AsyncMock()
+        plugin._forward_with_webhook = AsyncMock(return_value=True)
+        event = SimpleNamespace(
+            get_platform_name=lambda: "discord",
+        )
+        rule = {
+            "target_umo": "discord:ChannelMessage:987654",
+            "content_safety": {"enabled": False},
+        }
+
+        await plugin._forward_single_rule(
+            event,
+            rule,
+            "config-1",
+            "discord:ChannelMessage:123456",
+            [],
+        )
+
+        plugin._passes_llm_safety_check.assert_not_awaited()
+        plugin._forward_with_webhook.assert_awaited_once()
 
     # ------------------------------------------------------------------ #
     # 翻译功能测试
