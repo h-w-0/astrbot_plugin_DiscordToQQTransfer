@@ -188,7 +188,7 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertFalse(allowed)
-        self.assertEqual(reason, "命中本地词汇库")
+        self.assertEqual(reason, "命中本地词汇库：匹配词")
         lexicon.find_match.assert_called_once_with("待检查消息")
         plugin._call_llm_safety.assert_not_awaited()
 
