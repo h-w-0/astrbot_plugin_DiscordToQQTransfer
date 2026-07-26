@@ -165,6 +165,33 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(allowed)
         self.assertEqual(reason, "安全审核失败或超时")
 
+    def test_bundled_sensitive_lexicon_loads_vocabulary(self):
+        lexicon = module.load_bundled_sensitive_lexicon()
+
+        self.assertGreater(lexicon.word_count, 0)
+
+    async def test_local_sensitive_lexicon_blocks_before_llm_call(self):
+        plugin = object.__new__(MsgTransfer)
+        plugin.plugin_config = {
+            "llm_safety_check": {
+                "本地词汇库增强过滤": True,
+            }
+        }
+        plugin._call_llm_safety = AsyncMock()
+        lexicon = MagicMock()
+        lexicon.find_match.return_value = "匹配词"
+
+        with patch.object(module, "load_bundled_sensitive_lexicon", return_value=lexicon):
+            allowed, reason = await plugin._passes_llm_safety_check(
+                SimpleNamespace(),
+                "待检查消息",
+            )
+
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "命中本地词汇库")
+        lexicon.find_match.assert_called_once_with("待检查消息")
+        plugin._call_llm_safety.assert_not_awaited()
+
     async def test_empty_provider_list_uses_current_provider(self):
         provider = SuccessfulProvider()
         plugin = object.__new__(MsgTransfer)
@@ -425,6 +452,8 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("provider_id", safety_schema["items"])
         self.assertNotIn("enabled", safety_schema["items"])
+        self.assertFalse(safety_schema["items"]["本地词汇库增强过滤"]["default"])
+        self.assertEqual(safety_schema["items"]["本地词汇库增强过滤"]["type"], "bool")
         self.assertEqual(safety_schema["items"]["llm_max_tokens"]["default"], 512)
         self.assertIn("reasoning_effort", safety_schema["items"])
         providers = safety_schema["items"]["llm_providers"]

@@ -61,6 +61,11 @@
     "description": "转发规则内容审核的 LLM 公共配置",
     "type": "object",
     "items": {
+      "本地词汇库增强过滤": {
+        "description": "启用 Sensitive-lexicon 的本地词汇库增强过滤。启用后，已启用内容审核的转发规则命中词库任一词时会在调用 LLM 前直接拦截。词库范围较广，建议按需启用。",
+        "type": "bool",
+        "default": false
+      },
       "llm_providers": {
         "description": "LLM 供应商列表（按顺序依次尝试，第一个成功的即返回审核结果）。可在 Dashboard 中动态增删排序。",
         "type": "template_list",
