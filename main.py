@@ -490,7 +490,7 @@ class MsgTransfer(star.Star):
 
         self.store = MsgTransferStore(self.webhook_file, self.mapping_file, self.msg_mapping_file, self.forward_log_file)
         self.webhook_manager = DiscordWebhookManager(context)
-        self._source_forward_locks: dict[str, asyncio.Lock] = {}
+        self._source_output_tails: dict[str, asyncio.Future] = {}
 
     def _get_config_forward_rules(self) -> dict:
         """读取 Dashboard 中配置的消息转发规则"""
@@ -587,43 +587,74 @@ class MsgTransfer(star.Star):
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def forward_message(self, event: AstrMessageEvent):
-        """主转发逻辑 - 同一来源的消息按进入顺序串行处理。"""
+        """主转发逻辑 - LLM 可并发处理，输出按来源消息顺序发送。"""
+        source_umo = ""
+        output_completion = None
         try:
             if self._is_notice_event(event):
                 logger.debug("忽略 notice 事件，不参与消息转发")
                 return
 
             source_umo = str(event.unified_msg_origin)
-            async with self._get_source_forward_lock(source_umo):
-                rules = await self._list_forward_rules(source_umo)
-                if not rules:
-                    return
-                message_chain = event.get_messages()
-                # 记录从 Discord 转发的消息，供 QQ 回复引用时还原跳转链接
-                platform = event.get_platform_name()
-                if platform == "discord":
-                    discord_msg_id = event.message_obj.message_id
-                    if discord_msg_id:
-                        msg_text = DiscordWebhookManager.format_message_content(message_chain)
-                        if msg_text:
-                            await self.store.add_forward_log(str(discord_msg_id), msg_text, event.get_sender_id())
-                # 顺序依次await每个转发，保证顺序
-                for rid, rule in rules.items():
-                    await self._forward_single_rule(event, rule, rid, source_umo, message_chain)
+            output_predecessor, output_completion = self._reserve_source_output_slot(source_umo)
+            rules = await self._list_forward_rules(source_umo)
+            if not rules:
+                return
+            message_chain = event.get_messages()
+            # 记录从 Discord 转发的消息，供 QQ 回复引用时还原跳转链接
+            platform = event.get_platform_name()
+            if platform == "discord":
+                discord_msg_id = event.message_obj.message_id
+                if discord_msg_id:
+                    msg_text = DiscordWebhookManager.format_message_content(message_chain)
+                    if msg_text:
+                        await self.store.add_forward_log(str(discord_msg_id), msg_text, event.get_sender_id())
+            # 顺序依次await每个转发，保证顺序
+            for rid, rule in rules.items():
+                await self._forward_single_rule(
+                    event,
+                    rule,
+                    rid,
+                    source_umo,
+                    message_chain,
+                    output_predecessor=output_predecessor,
+                )
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError, KeyError) as e:
             logger.error(f"❌ 转发逻辑异常: {e}", exc_info=True)
+        finally:
+            if output_completion is not None:
+                self._complete_source_output_slot(source_umo, output_completion)
 
-    def _get_source_forward_lock(self, source_umo: str) -> asyncio.Lock:
-        locks = getattr(self, "_source_forward_locks", None)
-        if locks is None:
-            locks = {}
-            self._source_forward_locks = locks
+    def _reserve_source_output_slot(
+        self,
+        source_umo: str,
+    ) -> tuple[asyncio.Future | None, asyncio.Future]:
+        output_tails = getattr(self, "_source_output_tails", None)
+        if output_tails is None:
+            output_tails = {}
+            self._source_output_tails = output_tails
 
-        lock = locks.get(source_umo)
-        if lock is None:
-            lock = asyncio.Lock()
-            locks[source_umo] = lock
-        return lock
+        output_completion = asyncio.get_running_loop().create_future()
+        output_predecessor = output_tails.get(source_umo)
+        output_tails[source_umo] = output_completion
+        return output_predecessor, output_completion
+
+    def _complete_source_output_slot(
+        self,
+        source_umo: str,
+        output_completion: asyncio.Future,
+    ) -> None:
+        if not output_completion.done():
+            output_completion.set_result(None)
+
+        output_tails = getattr(self, "_source_output_tails", None)
+        if output_tails and output_tails.get(source_umo) is output_completion:
+            del output_tails[source_umo]
+
+    @staticmethod
+    async def _wait_for_source_output(output_predecessor: asyncio.Future | None) -> None:
+        if output_predecessor is not None:
+            await output_predecessor
 
     @staticmethod
     def _is_notice_event(event) -> bool:
@@ -636,7 +667,15 @@ class MsgTransfer(star.Star):
             post_type = getattr(raw_message, "post_type", None)
         return isinstance(post_type, str) and post_type.lower() == "notice"
 
-    async def _forward_single_rule(self, event: AstrMessageEvent, rule: dict, rid: str, source_umo: str, message_chain):
+    async def _forward_single_rule(
+        self,
+        event: AstrMessageEvent,
+        rule: dict,
+        rid: str,
+        source_umo: str,
+        message_chain,
+        output_predecessor: asyncio.Future | None = None,
+    ):
         """处理单个转发规则"""
         try:
             # 自动记录QQ号和名称到 mapping_file
@@ -663,12 +702,31 @@ class MsgTransfer(star.Star):
                 )
                 if not allowed:
                     logger.warning(f"转发 #{rid} 被内容安全筛查拦截: {target}")
+                    await self._wait_for_source_output(output_predecessor)
                     await self._reply_safety_block(event, target, safety_reason)
                     return
 
             webhook_url = await self.store.get_webhook_url(target)
             if webhook_url:
-                await self._forward_with_webhook(event, target, message_chain, rid, webhook_url, rule)
+                if output_predecessor is None:
+                    await self._forward_with_webhook(
+                        event,
+                        target,
+                        message_chain,
+                        rid,
+                        webhook_url,
+                        rule,
+                    )
+                else:
+                    await self._forward_with_webhook(
+                        event,
+                        target,
+                        message_chain,
+                        rid,
+                        webhook_url,
+                        rule,
+                        output_predecessor,
+                    )
                 return
 
             # 非 webhook 目标（如 QQ），通过 AstrBot 框架发送
@@ -690,6 +748,7 @@ class MsgTransfer(star.Star):
 
                 # Discord 端回复消息时，检测引用关系并还原 QQ 引用链
                 chain = await self._build_discord_reply_chain(event, source_platform_name, sender_name, msg_text, full_text)
+                await self._wait_for_source_output(output_predecessor)
                 sent, sent_result = await self._send_message_with_result(target, chain)
                 if sent:
                     await self._record_discord_to_target_mapping(event, sent_result, source_platform_name)
@@ -1597,7 +1656,16 @@ class MsgTransfer(star.Star):
 
         return content
 
-    async def _forward_with_webhook(self, event: AstrMessageEvent, target_umo: str, message_chain, rule_id: str, webhook_url: str, rule: dict = None) -> bool:
+    async def _forward_with_webhook(
+        self,
+        event: AstrMessageEvent,
+        target_umo: str,
+        message_chain,
+        rule_id: str,
+        webhook_url: str,
+        rule: dict = None,
+        output_predecessor: asyncio.Future | None = None,
+    ) -> bool:
         try:
             sender_name = event.get_sender_name()
             sender_id = event.get_sender_id()
@@ -1639,6 +1707,7 @@ class MsgTransfer(star.Star):
                 content = "[图片]"
 
             # Step 7: 发送并记录映射
+            await self._wait_for_source_output(output_predecessor)
             discord_msg_id = await self.webhook_manager.send_webhook_message(
                 webhook_url=webhook_url,
                 username=virtual_username,

@@ -77,46 +77,67 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
 
         plugin._list_forward_rules.assert_awaited_once()
 
-    async def test_same_source_messages_wait_for_prior_llm_work(self):
+    async def test_same_source_messages_keep_send_order_while_llm_runs_concurrently(self):
         plugin = object.__new__(MsgTransfer)
         plugin._list_forward_rules = AsyncMock(
-            return_value={"config-1": {"target_umo": "aiocqhttp:GroupMessage:2"}}
+            return_value={
+                "config-1": {
+                    "target_umo": "target:channel:2",
+                    "translation": {"enabled": True},
+                }
+            }
         )
-        first_started = asyncio.Event()
-        release_first = asyncio.Event()
-        forwarded_ids = []
+        plugin.store = SimpleNamespace(get_webhook_url=AsyncMock(return_value=None))
+        first_translation_started = asyncio.Event()
+        second_translation_finished = asyncio.Event()
+        release_first_translation = asyncio.Event()
+        sent_messages = []
 
-        async def slow_forward_rule(event, *_args):
-            message_id = event.message_obj.message_id
-            forwarded_ids.append(message_id)
-            if message_id == "first":
-                first_started.set()
-                await release_first.wait()
+        async def translate_message(_event, msg_text, _rule):
+            if msg_text == "first":
+                first_translation_started.set()
+                await release_first_translation.wait()
+            else:
+                second_translation_finished.set()
+            return f"translated:{msg_text}"
 
-        plugin._forward_single_rule = AsyncMock(side_effect=slow_forward_rule)
+        async def build_chain(_event, _platform, _sender, msg_text, _full_text):
+            return msg_text
+
+        async def send_message(_target, chain):
+            sent_messages.append(chain)
+            return True, SimpleNamespace(message_id=f"target-{chain}")
+
+        plugin._translate_message = AsyncMock(side_effect=translate_message)
+        plugin._build_discord_reply_chain = AsyncMock(side_effect=build_chain)
+        plugin._send_message_with_result = AsyncMock(side_effect=send_message)
+        plugin._record_discord_to_target_mapping = AsyncMock()
 
         def make_event(message_id: str):
             return SimpleNamespace(
-                unified_msg_origin="discord:channel:1",
+                unified_msg_origin="test:channel:1",
                 message_obj=SimpleNamespace(
                     message_id=message_id,
                     raw_message={"post_type": "message"},
                 ),
                 get_messages=lambda: [SimpleNamespace(text=message_id)],
-                get_platform_name=lambda: "aiocqhttp",
+                get_platform_name=lambda: "test",
+                get_sender_name=lambda: "tester",
+                get_sender_id=lambda: "user-1",
             )
 
         first_task = asyncio.create_task(plugin.forward_message(make_event("first")))
-        await asyncio.wait_for(first_started.wait(), timeout=1)
+        await asyncio.wait_for(first_translation_started.wait(), timeout=1)
         second_task = asyncio.create_task(plugin.forward_message(make_event("second")))
+        await asyncio.wait_for(second_translation_finished.wait(), timeout=1)
         await asyncio.sleep(0)
 
-        self.assertEqual(forwarded_ids, ["first"])
+        self.assertEqual(sent_messages, [])
 
-        release_first.set()
+        release_first_translation.set()
         await asyncio.gather(first_task, second_task)
 
-        self.assertEqual(forwarded_ids, ["first", "second"])
+        self.assertEqual(sent_messages, ["translated:first", "translated:second"])
 
     async def test_openai_provider_error_follows_allow_on_error_config(self):
         plugin = object.__new__(MsgTransfer)
