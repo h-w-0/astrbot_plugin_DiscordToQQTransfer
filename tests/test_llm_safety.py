@@ -301,6 +301,7 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
             "model": "gpt-5",
         }
         cfg = {
+            "llm_max_tokens": 2048,
             "reasoning_effort": "high",
             "timeout_seconds": 5,
         }
@@ -323,7 +324,7 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
             model="gpt-5",
             instructions="system",
             input="审核载荷",
-            max_output_tokens=512,
+            max_output_tokens=2048,
             reasoning={"effort": "high"},
         )
         fake_client.close.assert_awaited_once()
@@ -417,12 +418,15 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
 
     def test_schema_uses_provider_templates(self):
         schema = json.loads((REPO_ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
+        self.assertEqual(next(iter(schema)), "forward_rules")
         self.assertEqual(schema["debug_log_llm_response"]["type"], "bool")
         self.assertFalse(schema["debug_log_llm_response"]["default"])
         safety_schema = schema["llm_safety_check"]
 
         self.assertNotIn("provider_id", safety_schema["items"])
         self.assertNotIn("enabled", safety_schema["items"])
+        self.assertEqual(safety_schema["items"]["llm_max_tokens"]["default"], 512)
+        self.assertIn("reasoning_effort", safety_schema["items"])
         providers = safety_schema["items"]["llm_providers"]
         self.assertEqual(providers["type"], "template_list")
         self.assertEqual(
@@ -440,6 +444,8 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("enabled", translation_schema["items"])
         self.assertIn("llm_providers", translation_schema["items"])
         self.assertIn("timeout_seconds", translation_schema["items"])
+        self.assertEqual(translation_schema["items"]["llm_max_tokens"]["default"], 512)
+        self.assertEqual(translation_schema["items"]["reasoning_effort"]["default"], "")
         self.assertIn("system_prompt", translation_schema["items"])
         # 验证翻译供应商模板与安全筛查一致
         tl_providers = translation_schema["items"]["llm_providers"]
@@ -882,6 +888,8 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
                 "enabled": True,
                 "system_prompt": "",
                 "timeout_seconds": 15,
+                "llm_max_tokens": 512,
+                "reasoning_effort": "",
                 "llm_providers": [],
             },
             session_id=plugin._build_translation_session_id(event),
@@ -951,6 +959,8 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(config["enabled"])
         self.assertEqual(config["llm_providers"], [])
         self.assertEqual(config["timeout_seconds"], 30)
+        self.assertEqual(config["llm_max_tokens"], 512)
+        self.assertEqual(config["reasoning_effort"], "")
         self.assertIn("{target_language}", config["system_prompt"])
 
     def test_get_llm_translation_config_merges_with_defaults(self):
@@ -959,6 +969,8 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
             "llm_translation": {
                 "enabled": True,
                 "timeout_seconds": 60,
+                "llm_max_tokens": 2048,
+                "reasoning_effort": "high",
             }
         }
 
@@ -966,6 +978,8 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(config["enabled"])
         self.assertEqual(config["timeout_seconds"], 60)
+        self.assertEqual(config["llm_max_tokens"], 2048)
+        self.assertEqual(config["reasoning_effort"], "high")
         self.assertEqual(config["llm_providers"], [])
         self.assertIn("{target_language}", config["system_prompt"])
 

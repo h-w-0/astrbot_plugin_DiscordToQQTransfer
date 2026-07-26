@@ -1,4 +1,62 @@
 {
+  "forward_rules": {
+    "description": "消息转发规则。每条规则将一个源会话的消息转发到一个目标会话，可在 Dashboard 中动态增删。",
+    "type": "template_list",
+    "default": [],
+    "templates": {
+      "forward_rule": {
+        "name": "消息转发规则",
+        "description": "配置 source_umo 到 target_umo 的消息转发关系",
+        "items": {
+          "source_umo": {
+            "description": "源会话 UMO",
+            "type": "string",
+            "default": "",
+            "hint": "例如：aiocqhttp:GroupMessage:123456"
+          },
+          "target_umo": {
+            "description": "目标会话 UMO",
+            "type": "string",
+            "default": "",
+            "hint": "例如：discord:ChannelMessage:987654"
+          },
+          "translation": {
+            "description": "翻译设置（可选配置）",
+            "type": "object",
+            "items": {
+              "enabled": {
+                "description": "对此规则启用 LLM 翻译",
+                "type": "bool",
+                "default": false
+              },
+              "target_language": {
+                "description": "目标语言，使用语言全称（如 Chinese/English/Japanese）",
+                "type": "string",
+                "default": "Chinese",
+                "hint": "Chinese/English/French/Portuguese/Spanish/Japanese/Turkish/Russian/Arabic/Korean/Thai/Italian/German/Vietnamese/Malay/Indonesian/Filipino/Hindi/Traditional Chinese/Polish/Czech/Dutch/Khmer/Burmese/Persian/Gujarati/Urdu/Telugu/Marathi/Hebrew/Bengali/Tamil/Ukrainian/Tibetan/Kazakh/Mongolian/Uyghur/Cantonese"
+              },
+              "source_language": {
+                "description": "源语言（可选，留空则自动检测）。使用语言全称，如 English、中文。",
+                "type": "string",
+                "default": ""
+              }
+            }
+          },
+          "content_safety": {
+            "description": "内容审核设置（仅影响当前转发规则）",
+            "type": "object",
+            "items": {
+              "enabled": {
+                "description": "对此规则启用 LLM 内容审核",
+                "type": "bool",
+                "default": false
+              }
+            }
+          }
+        }
+      }
+    }
+  },
   "llm_safety_check": {
     "description": "转发规则内容审核的 LLM 公共配置",
     "type": "object",
@@ -104,6 +162,11 @@
             }
           }
         }
+      },
+      "llm_max_tokens": {
+        "description": "大模型单次调用输出的最大 token 数。使用会先输出思考过程的本地模型时建议调大，避免最终审核结果或翻译结果被截断。",
+        "type": "int",
+        "default": 512
       },
       "reasoning_effort": {
         "description": "设置 OpenAI 兼容 API 或 Responses API 请求中的推理强度。设为空字符串则不传递此参数。",
@@ -244,6 +307,17 @@
           }
         }
       },
+      "llm_max_tokens": {
+        "description": "大模型单次调用输出的最大 token 数。使用会先输出思考过程的本地模型时建议调大，避免最终审核结果或翻译结果被截断。",
+        "type": "int",
+        "default": 512
+      },
+      "reasoning_effort": {
+        "description": "设置 LLM API 请求中的 reasoning_effort 参数（如 DeepSeek 模型支持 low/medium/high）。用于控制模型推理深度：low=快速低消耗，medium=适中，high=深度推理更严谨。设为空字符串则不传递此参数（兼容不支持此参数的模型）。",
+        "type": "string",
+        "default": "",
+        "hint": "可选值: 留空(不启用) / low / medium / high"
+      },
       "timeout_seconds": {
         "description": "翻译超时时间（秒）",
         "type": "int",
@@ -265,64 +339,5 @@
     "description": "调试开关。开启后会将大模型最终返回的内容输出到日志，可能包含消息内容、翻译结果或审核理由。",
     "type": "bool",
     "default": false
-  },
-  "forward_rules": {
-    "description": "消息转发规则。每条规则将一个源会话的消息转发到一个目标会话，可在 Dashboard 中动态增删。",
-    "type": "template_list",
-    "default": [],
-    "templates": {
-      "forward_rule": {
-        "name": "消息转发规则",
-        "description": "配置 source_umo 到 target_umo 的消息转发关系",
-        "items": {
-          "source_umo": {
-            "description": "源会话 UMO",
-            "type": "string",
-            "default": "",
-            "hint": "例如：aiocqhttp:GroupMessage:123456"
-          },
-          "target_umo": {
-            "description": "目标会话 UMO",
-            "type": "string",
-            "default": "",
-            "hint": "例如：discord:ChannelMessage:987654"
-          },
-          "translation": {
-            "description": "翻译设置（可选配置）",
-            "type": "object",
-            "items": {
-              "enabled": {
-                "description": "对此规则启用 LLM 翻译",
-                "type": "bool",
-                "default": false
-              },
-              "target_language": {
-                "description": "目标语言，使用语言全称（如 Chinese/English/Japanese）",
-                "type": "string",
-                "default": "Chinese",
-                "hint": "Chinese/English/French/Portuguese/Spanish/Japanese/Turkish/Russian/Arabic/Korean/Thai/Italian/German/Vietnamese/Malay/Indonesian/Filipino/Hindi/Traditional Chinese/Polish/Czech/Dutch/Khmer/Burmese/Persian/Gujarati/Urdu/Telugu/Marathi/Hebrew/Bengali/Tamil/Ukrainian/Tibetan/Kazakh/Mongolian/Uyghur/Cantonese"
-              },
-              "source_language": {
-                "description": "源语言（可选，留空则自动检测）。使用语言全称，如 English、中文。",
-                "type": "string",
-                "default": ""
-              }
-            }
-          }
-,
-          "content_safety": {
-            "description": "内容审核设置（仅影响当前转发规则）",
-            "type": "object",
-            "items": {
-              "enabled": {
-                "description": "对此规则启用 LLM 内容审核",
-                "type": "bool",
-                "default": false
-              }
-            }
-          }
-        }
-      }
-    }
   }
 }
