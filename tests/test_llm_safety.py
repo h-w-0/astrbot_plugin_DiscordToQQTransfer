@@ -77,6 +77,47 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
 
         plugin._list_forward_rules.assert_awaited_once()
 
+    async def test_same_source_messages_wait_for_prior_llm_work(self):
+        plugin = object.__new__(MsgTransfer)
+        plugin._list_forward_rules = AsyncMock(
+            return_value={"config-1": {"target_umo": "aiocqhttp:GroupMessage:2"}}
+        )
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        forwarded_ids = []
+
+        async def slow_forward_rule(event, *_args):
+            message_id = event.message_obj.message_id
+            forwarded_ids.append(message_id)
+            if message_id == "first":
+                first_started.set()
+                await release_first.wait()
+
+        plugin._forward_single_rule = AsyncMock(side_effect=slow_forward_rule)
+
+        def make_event(message_id: str):
+            return SimpleNamespace(
+                unified_msg_origin="discord:channel:1",
+                message_obj=SimpleNamespace(
+                    message_id=message_id,
+                    raw_message={"post_type": "message"},
+                ),
+                get_messages=lambda: [SimpleNamespace(text=message_id)],
+                get_platform_name=lambda: "aiocqhttp",
+            )
+
+        first_task = asyncio.create_task(plugin.forward_message(make_event("first")))
+        await asyncio.wait_for(first_started.wait(), timeout=1)
+        second_task = asyncio.create_task(plugin.forward_message(make_event("second")))
+        await asyncio.sleep(0)
+
+        self.assertEqual(forwarded_ids, ["first"])
+
+        release_first.set()
+        await asyncio.gather(first_task, second_task)
+
+        self.assertEqual(forwarded_ids, ["first", "second"])
+
     async def test_openai_provider_error_follows_allow_on_error_config(self):
         plugin = object.__new__(MsgTransfer)
         plugin.context = DummyContext()

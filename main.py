@@ -490,6 +490,7 @@ class MsgTransfer(star.Star):
 
         self.store = MsgTransferStore(self.webhook_file, self.mapping_file, self.msg_mapping_file, self.forward_log_file)
         self.webhook_manager = DiscordWebhookManager(context)
+        self._source_forward_locks: dict[str, asyncio.Lock] = {}
 
     def _get_config_forward_rules(self) -> dict:
         """读取 Dashboard 中配置的消息转发规则"""
@@ -586,30 +587,43 @@ class MsgTransfer(star.Star):
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def forward_message(self, event: AstrMessageEvent):
-        """主转发逻辑 - 顺序队列处理所有转发规则，保证顺序一致"""
+        """主转发逻辑 - 同一来源的消息按进入顺序串行处理。"""
         try:
             if self._is_notice_event(event):
                 logger.debug("忽略 notice 事件，不参与消息转发")
                 return
 
             source_umo = str(event.unified_msg_origin)
-            rules = await self._list_forward_rules(source_umo)
-            if not rules:
-                return
-            message_chain = event.get_messages()
-            # 记录从 Discord 转发的消息，供 QQ 回复引用时还原跳转链接
-            platform = event.get_platform_name()
-            if platform == "discord":
-                discord_msg_id = event.message_obj.message_id
-                if discord_msg_id:
-                    msg_text = DiscordWebhookManager.format_message_content(message_chain)
-                    if msg_text:
-                        await self.store.add_forward_log(str(discord_msg_id), msg_text, event.get_sender_id())
-            # 顺序依次await每个转发，保证顺序
-            for rid, rule in rules.items():
-                await self._forward_single_rule(event, rule, rid, source_umo, message_chain)
+            async with self._get_source_forward_lock(source_umo):
+                rules = await self._list_forward_rules(source_umo)
+                if not rules:
+                    return
+                message_chain = event.get_messages()
+                # 记录从 Discord 转发的消息，供 QQ 回复引用时还原跳转链接
+                platform = event.get_platform_name()
+                if platform == "discord":
+                    discord_msg_id = event.message_obj.message_id
+                    if discord_msg_id:
+                        msg_text = DiscordWebhookManager.format_message_content(message_chain)
+                        if msg_text:
+                            await self.store.add_forward_log(str(discord_msg_id), msg_text, event.get_sender_id())
+                # 顺序依次await每个转发，保证顺序
+                for rid, rule in rules.items():
+                    await self._forward_single_rule(event, rule, rid, source_umo, message_chain)
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError, KeyError) as e:
             logger.error(f"❌ 转发逻辑异常: {e}", exc_info=True)
+
+    def _get_source_forward_lock(self, source_umo: str) -> asyncio.Lock:
+        locks = getattr(self, "_source_forward_locks", None)
+        if locks is None:
+            locks = {}
+            self._source_forward_locks = locks
+
+        lock = locks.get(source_umo)
+        if lock is None:
+            lock = asyncio.Lock()
+            locks[source_umo] = lock
+        return lock
 
     @staticmethod
     def _is_notice_event(event) -> bool:
