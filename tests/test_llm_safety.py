@@ -853,6 +853,10 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
             MsgTransfer._format_translation_prefix("", "English"),
             "(Translated from original text)",
         )
+        self.assertEqual(
+            MsgTransfer._format_translation_prefix("Russian", "Chinese"),
+            "(从俄文翻译)",
+        )
 
     async def test_translation_detects_source_language(self):
         """验证自动检测源语言并显示正确的英文前缀"""
@@ -920,6 +924,19 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
             )
 
         detect_lang.assert_not_called()
+
+    def test_source_language_detection_handles_short_cyrillic(self):
+        """共享西里尔字母的短文本默认按俄语处理。"""
+        with patch.object(module, "_detect_lang") as detect_lang:
+            self.assertEqual(MsgTransfer._detect_source_language("тест"), "Russian")
+            self.assertEqual(MsgTransfer._detect_source_language("привет"), "Russian")
+            self.assertEqual(MsgTransfer._detect_source_language("тест <@123>"), "Russian")
+
+        detect_lang.assert_not_called()
+
+    def test_source_language_detection_uses_distinctive_cyrillic_letters(self):
+        self.assertEqual(MsgTransfer._detect_source_language("привіт"), "Ukrainian")
+        self.assertEqual(MsgTransfer._detect_source_language("маё імя ўлад"), "Belarusian")
 
     def test_source_language_detection_has_safe_fallbacks(self):
         """检测组件缺失时仍识别 ASCII，其他未知内容不冒充中文。"""

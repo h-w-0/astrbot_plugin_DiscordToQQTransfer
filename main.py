@@ -61,10 +61,14 @@ LANG_CODE_MAP = {
 _HAN_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 _KANA_RE = re.compile(r"[\u3040-\u30ff\uff66-\uff9f]")
 _HANGUL_RE = re.compile(r"[\u1100-\u11ff\u3130-\u318f\ua960-\ua97f\uac00-\ud7ff]")
+_CYRILLIC_RE = re.compile(r"[\u0400-\u052f]")
+_UKRAINIAN_HINT_RE = re.compile(r"[\u0404\u0406\u0407\u0490\u0454\u0456\u0457\u0491]")
+_BELARUSIAN_HINT_RE = re.compile(r"[\u040e\u045e]")
 _ASCII_LETTER_RE = re.compile(r"[A-Za-z]")
 _URL_RE = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
 _DISCORD_MARKUP_RE = re.compile(r"<(?:(?:@!?|@&|#)\d+|a?:[^:>]+:\d+)>")
 _SHORT_ASCII_ENGLISH_MAX_LETTERS = 12
+_SHORT_CYRILLIC_RUSSIAN_MAX_LETTERS = 12
 
 if _OpenAIError is None:
     llm_provider_error_types = (asyncio.TimeoutError, aiohttp.ClientError, OSError, ValueError, RuntimeError)
@@ -1354,6 +1358,18 @@ class MsgTransfer(star.Star):
         if _HAN_RE.search(sample):
             return "Chinese"
 
+        cyrillic_letters = _CYRILLIC_RE.findall(sample)
+        has_only_cyrillic_letters = bool(cyrillic_letters) and len(cyrillic_letters) == sum(
+            char.isalpha() for char in sample
+        )
+        if has_only_cyrillic_letters:
+            if _BELARUSIAN_HINT_RE.search(sample):
+                return "Belarusian"
+            if _UKRAINIAN_HINT_RE.search(sample):
+                return "Ukrainian"
+            if len(cyrillic_letters) <= _SHORT_CYRILLIC_RUSSIAN_MAX_LETTERS:
+                return "Russian"
+
         ascii_letters = _ASCII_LETTER_RE.findall(sample)
         has_only_ascii_letters = bool(ascii_letters) and all(
             ord(char) < 128 for char in sample if char.isalpha()
@@ -1374,6 +1390,8 @@ class MsgTransfer(star.Star):
         # input. Plain ASCII is the safest useful fallback for this plugin.
         if has_only_ascii_letters:
             return "English"
+        if has_only_cyrillic_letters:
+            return "Russian"
         return "Unknown"
 
     @staticmethod
@@ -1410,6 +1428,8 @@ class MsgTransfer(star.Star):
             source_name = "中文" if chinese_target else "Chinese"
         elif source_key in {"english", "英语", "英文", "en", "en-us", "en-gb"}:
             source_name = "英文" if chinese_target else "English"
+        elif source_key in {"russian", "俄语", "俄文", "ru", "русский"}:
+            source_name = "俄文" if chinese_target else "Russian"
         else:
             source_name = str(source_language or "").strip()
 
