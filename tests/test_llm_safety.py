@@ -845,6 +845,14 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
             MsgTransfer._format_translation_prefix("Chinese", "en"),
             "(Translated from Chinese)",
         )
+        self.assertEqual(
+            MsgTransfer._format_translation_prefix("Unknown", "Chinese"),
+            "(从原文翻译)",
+        )
+        self.assertEqual(
+            MsgTransfer._format_translation_prefix("", "English"),
+            "(Translated from original text)",
+        )
 
     async def test_translation_detects_source_language(self):
         """验证自动检测源语言并显示正确的英文前缀"""
@@ -900,6 +908,31 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, "French")
         detect_lang.assert_called_once_with("Bonjour tout le monde")
+
+    def test_source_language_detection_handles_short_english(self):
+        """短英文不交给容易误判短文本的 langdetect。"""
+        with patch.object(module, "_detect_lang") as detect_lang:
+            self.assertEqual(MsgTransfer._detect_source_language("test"), "English")
+            self.assertEqual(MsgTransfer._detect_source_language("hello world"), "English")
+            self.assertEqual(
+                MsgTransfer._detect_source_language("test https://example.com <@123>"),
+                "English",
+            )
+
+        detect_lang.assert_not_called()
+
+    def test_source_language_detection_has_safe_fallbacks(self):
+        """检测组件缺失时仍识别 ASCII，其他未知内容不冒充中文。"""
+        with patch.object(module, "_detect_lang", None):
+            self.assertEqual(
+                MsgTransfer._detect_source_language("This is a longer English sentence"),
+                "English",
+            )
+            self.assertEqual(MsgTransfer._detect_source_language("12345 !!!"), "Unknown")
+            self.assertEqual(
+                MsgTransfer._detect_source_language("https://example.com <@123>"),
+                "Unknown",
+            )
 
     async def test_translation_uses_rule_source_language_override(self):
         """验证规则中手动指定 source_language 时优先使用"""

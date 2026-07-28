@@ -39,6 +39,12 @@ except ImportError:
 
 # langdetect ISO 639-1 → Hy-MT2 英文全称映射
 LANG_CODE_MAP = {
+    "af": "Afrikaans", "bg": "Bulgarian", "ca": "Catalan", "cy": "Welsh",
+    "da": "Danish", "et": "Estonian", "fi": "Finnish", "hr": "Croatian",
+    "hu": "Hungarian", "lt": "Lithuanian", "lv": "Latvian",
+    "mk": "Macedonian", "no": "Norwegian", "ro": "Romanian",
+    "sk": "Slovak", "sl": "Slovenian", "so": "Somali", "sq": "Albanian",
+    "sv": "Swedish", "sw": "Swahili",
     "zh": "Chinese", "zh-cn": "Chinese", "zh-tw": "Traditional Chinese",
     "en": "English", "fr": "French", "pt": "Portuguese", "es": "Spanish",
     "ja": "Japanese", "tr": "Turkish", "ru": "Russian", "ar": "Arabic",
@@ -51,11 +57,14 @@ LANG_CODE_MAP = {
     "kk": "Kazakh", "mn": "Mongolian", "ug": "Uyghur", "yue": "Cantonese",
 }
 
-# Distinctive writing systems are more reliable than statistical detection for
-# short CJK messages.
+# Distinctive writing systems are more reliable than statistical detection.
 _HAN_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 _KANA_RE = re.compile(r"[\u3040-\u30ff\uff66-\uff9f]")
 _HANGUL_RE = re.compile(r"[\u1100-\u11ff\u3130-\u318f\ua960-\ua97f\uac00-\ud7ff]")
+_ASCII_LETTER_RE = re.compile(r"[A-Za-z]")
+_URL_RE = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
+_DISCORD_MARKUP_RE = re.compile(r"<(?:(?:@!?|@&|#)\d+|a?:[^:>]+:\d+)>")
+_SHORT_ASCII_ENGLISH_MAX_LETTERS = 12
 
 if _OpenAIError is None:
     llm_provider_error_types = (asyncio.TimeoutError, aiohttp.ClientError, OSError, ValueError, RuntimeError)
@@ -1325,27 +1334,47 @@ class MsgTransfer(star.Star):
 
     @staticmethod
     def _detect_source_language(text: str) -> str:
-        """优先按文字系统识别短文本，再用 langdetect 检测其他语言。"""
+        """分层识别源语言；无法可靠识别时返回 Unknown。"""
         if not text or not text.strip():
-            return ""
+            return "Unknown"
 
-        # Han characters alone are Chinese; kana distinguishes Japanese from
-        # Chinese text that also contains Han characters.
-        if _KANA_RE.search(text):
+        # URLs, Discord mentions and custom emoji contain Latin characters but
+        # do not express the message language.
+        sample = _URL_RE.sub(" ", text)
+        sample = _DISCORD_MARKUP_RE.sub(" ", sample)
+        sample = " ".join(sample.split())
+        if not sample or not any(char.isalpha() for char in sample):
+            return "Unknown"
+
+        # Kana distinguishes Japanese from Chinese text containing Han chars.
+        if _KANA_RE.search(sample):
             return "Japanese"
-        if _HANGUL_RE.search(text):
+        if _HANGUL_RE.search(sample):
             return "Korean"
-        if _HAN_RE.search(text):
+        if _HAN_RE.search(sample):
             return "Chinese"
 
-        if _detect_lang is None:
-            return ""
-        try:
-            code = _detect_lang(text)
-            code = code.lower()
-            return LANG_CODE_MAP.get(code, "")
-        except Exception:
-            return ""
+        ascii_letters = _ASCII_LETTER_RE.findall(sample)
+        has_only_ascii_letters = bool(ascii_letters) and all(
+            ord(char) < 128 for char in sample if char.isalpha()
+        )
+        if has_only_ascii_letters and len(ascii_letters) <= _SHORT_ASCII_ENGLISH_MAX_LETTERS:
+            return "English"
+
+        if _detect_lang is not None:
+            try:
+                code = _detect_lang(sample).lower()
+                detected_language = LANG_CODE_MAP.get(code)
+                if detected_language:
+                    return detected_language
+            except Exception:
+                pass
+
+        # langdetect is optional at runtime and is unreliable for very short
+        # input. Plain ASCII is the safest useful fallback for this plugin.
+        if has_only_ascii_letters:
+            return "English"
+        return "Unknown"
 
     @staticmethod
     def _format_translation_prefix(source_language: str, target_language: str) -> str:
@@ -1363,6 +1392,10 @@ class MsgTransfer(star.Star):
         }
 
         source_key = str(source_language or "").strip().lower().replace("_", "-")
+        if source_key in {"", "unknown", "auto", "und"}:
+            if chinese_target:
+                return "(从原文翻译)"
+            return "(Translated from original text)"
         if source_key in {
             "chinese",
             "中文",
@@ -1378,7 +1411,7 @@ class MsgTransfer(star.Star):
         elif source_key in {"english", "英语", "英文", "en", "en-us", "en-gb"}:
             source_name = "英文" if chinese_target else "English"
         else:
-            source_name = str(source_language or "").strip() or ("中文" if chinese_target else "Chinese")
+            source_name = str(source_language or "").strip()
 
         if chinese_target:
             return f"(从{source_name}翻译)"
