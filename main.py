@@ -1324,16 +1324,20 @@ class MsgTransfer(star.Star):
 
     def _get_safety_output_language(self, rule: dict) -> tuple[bool, str]:
         """Return whether translation is active and its configured target language."""
+        if not self._is_translation_enabled_for_rule(rule):
+            return False, "Chinese"
+        rule_translation = rule.get("translation", {}) if isinstance(rule, dict) else {}
+        target_language = str(rule_translation.get("target_language") or "Chinese").strip()
+        return True, target_language or "Chinese"
+
+    def _is_translation_enabled_for_rule(self, rule: dict | None) -> bool:
         rule_translation = rule.get("translation", {}) if isinstance(rule, dict) else {}
         if not isinstance(rule_translation, dict) or not self._coerce_config_bool(
             rule_translation.get("enabled"), False
         ):
-            return False, "Chinese"
+            return False
         translation_cfg = self._get_llm_translation_config()
-        if not self._coerce_config_bool(translation_cfg.get("enabled"), False):
-            return False, "Chinese"
-        target_language = str(rule_translation.get("target_language") or "Chinese").strip()
-        return True, target_language or "Chinese"
+        return self._coerce_config_bool(translation_cfg.get("enabled"), False)
 
     @staticmethod
     def _is_chinese_language(language: str) -> bool:
@@ -1780,7 +1784,13 @@ class MsgTransfer(star.Star):
                     discord_sender_name = parsed_sender
         return quote_text, quote_sender, discord_sender_name
 
-    async def _resolve_reply_target(self, reply_to_qq_id, quote_text, target_umo):
+    async def _resolve_reply_target(
+        self,
+        reply_to_qq_id,
+        quote_text,
+        target_umo,
+        prefer_forwarded_content: bool = True,
+    ):
         """解析回复目标，返回 Discord 消息、发送者、跳转链接和已转发内容。"""
         reply_to_discord_id = None
         discord_sender_id = None
@@ -1790,7 +1800,8 @@ class MsgTransfer(star.Star):
             if reply_to_discord_id:
                 meta = await self.store.get_msg_meta(reply_to_qq_id)
                 if meta:
-                    forwarded_quote_text = meta.get("forwarded_content") or None
+                    if prefer_forwarded_content:
+                        forwarded_quote_text = meta.get("forwarded_content") or None
                     if meta.get("origin") == "discord":
                         discord_sender_id = meta.get("user_id")
 
@@ -1817,7 +1828,11 @@ class MsgTransfer(star.Star):
                         if hasattr(channel, 'guild') and channel.guild:
                             guild_id = channel.guild.id
                             jump_url = f"https://discord.com/channels/{guild_id}/{channel_id}/{reply_to_discord_id}"
-                        if not forwarded_quote_text and hasattr(channel, "fetch_message"):
+                        if (
+                            prefer_forwarded_content
+                            and not forwarded_quote_text
+                            and hasattr(channel, "fetch_message")
+                        ):
                             try:
                                 referenced_message = await channel.fetch_message(int(reply_to_discord_id))
                                 forwarded_quote_text = getattr(referenced_message, "content", None) or None
@@ -1911,8 +1926,12 @@ class MsgTransfer(star.Star):
             quote_text, quote_sender, discord_sender_name = self._resolve_forward_quote(quote_text, quote_sender)
 
             # Step 3: 解析 Discord 端回复目标
+            translation_enabled = self._is_translation_enabled_for_rule(rule)
             reply_to_discord_id, discord_sender_id, jump_url, forwarded_quote_text = await self._resolve_reply_target(
-                reply_to_qq_id, quote_text, target_umo
+                reply_to_qq_id,
+                quote_text,
+                target_umo,
+                prefer_forwarded_content=translation_enabled,
             )
             if forwarded_quote_text:
                 quote_text = forwarded_quote_text

@@ -796,6 +796,62 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
         )
         channel.fetch_message.assert_awaited_once_with(456)
 
+    async def test_untranslated_rule_does_not_use_forwarded_translation(self):
+        channel = SimpleNamespace(
+            guild=SimpleNamespace(id=123),
+            fetch_message=AsyncMock(
+                side_effect=AssertionError("未翻译规则不应读取 Discord 消息内容")
+            ),
+        )
+        client = SimpleNamespace(fetch_channel=AsyncMock(return_value=channel))
+        plugin = object.__new__(MsgTransfer)
+        plugin.store = SimpleNamespace(
+            get_msg_mapping=AsyncMock(return_value="456"),
+            get_msg_meta=AsyncMock(
+                return_value={
+                    "origin": "qq",
+                    "forwarded_content": "(Translated from Chinese)Wrong quote",
+                }
+            ),
+        )
+        plugin.webhook_manager = SimpleNamespace(get_discord_client=lambda: client)
+
+        result = await plugin._resolve_reply_target(
+            "qq-message-1",
+            "应保留的原文",
+            "discord:ChannelMessage:987654",
+            prefer_forwarded_content=False,
+        )
+
+        self.assertEqual(result[3], None)
+        self.assertEqual(
+            result[2],
+            "https://discord.com/channels/123/987654/456",
+        )
+        channel.fetch_message.assert_not_awaited()
+
+    def test_forwarded_quote_preference_follows_current_rule_translation(self):
+        plugin = object.__new__(MsgTransfer)
+        plugin.plugin_config = {"llm_translation": {"enabled": True}}
+
+        self.assertTrue(
+            plugin._is_translation_enabled_for_rule(
+                {"translation": {"enabled": True, "target_language": "English"}}
+            )
+        )
+        self.assertFalse(
+            plugin._is_translation_enabled_for_rule(
+                {"translation": {"enabled": False, "target_language": "English"}}
+            )
+        )
+
+        plugin.plugin_config = {"llm_translation": {"enabled": False}}
+        self.assertFalse(
+            plugin._is_translation_enabled_for_rule(
+                {"translation": {"enabled": True, "target_language": "English"}}
+            )
+        )
+
     async def test_message_mapping_persists_forwarded_content_with_legacy_read_support(self):
         store = object.__new__(module.MsgTransferStore)
         store._msg_mapping_lock = asyncio.Lock()
