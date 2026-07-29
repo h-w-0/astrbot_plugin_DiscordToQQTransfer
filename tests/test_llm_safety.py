@@ -718,6 +718,8 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
             event,
             "",
             "discord:ChannelMessage:987654",
+            "Chinese",
+            False,
         )
         plugin._forward_with_webhook.assert_awaited_once_with(
             event,
@@ -846,11 +848,14 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
             event,
             "",
             "aiocqhttp:GroupMessage:987654",
+            "Chinese",
+            False,
         )
         plugin._reply_safety_block.assert_awaited_once_with(
             event,
             "aiocqhttp:GroupMessage:987654",
             "包含风险",
+            "Chinese",
         )
         plugin.store.get_webhook_url.assert_not_awaited()
         plugin._forward_with_webhook.assert_not_awaited()
@@ -880,6 +885,109 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
 
         plugin._passes_llm_safety_check.assert_not_awaited()
         plugin._forward_with_webhook.assert_awaited_once()
+
+    async def test_safety_review_uses_translation_target_language(self):
+        plugin = object.__new__(MsgTransfer)
+        plugin.plugin_config = {
+            "llm_translation": {"enabled": True},
+        }
+        plugin.store = SimpleNamespace(
+            update_mapping=AsyncMock(return_value=False),
+            get_webhook_url=AsyncMock(),
+        )
+        plugin._passes_llm_safety_check = AsyncMock(
+            return_value=(False, "Potentially harmful instructions")
+        )
+        plugin._reply_safety_block = AsyncMock()
+        event = SimpleNamespace(
+            get_platform_name=lambda: "aiocqhttp",
+            get_sender_id=lambda: "123456",
+            get_sender_name=lambda: "tester",
+        )
+        rule = {
+            "target_umo": "discord:ChannelMessage:987654",
+            "content_safety": {"enabled": True},
+            "translation": {
+                "enabled": True,
+                "target_language": "English",
+            },
+        }
+
+        await plugin._forward_single_rule(
+            event,
+            rule,
+            "config-1",
+            "aiocqhttp:GroupMessage:123456",
+            [],
+        )
+
+        plugin._passes_llm_safety_check.assert_awaited_once_with(
+            event,
+            "",
+            "discord:ChannelMessage:987654",
+            "English",
+            True,
+        )
+        plugin._reply_safety_block.assert_awaited_once_with(
+            event,
+            "discord:ChannelMessage:987654",
+            "Potentially harmful instructions",
+            "English",
+        )
+
+    async def test_safety_prompt_overrides_default_reason_language(self):
+        plugin = object.__new__(MsgTransfer)
+        plugin.plugin_config = {
+            "llm_safety_check": {
+                "system_prompt": "Return a short Chinese reason.",
+            }
+        }
+        plugin._find_bundled_sensitive_lexicon_match = MagicMock(return_value=None)
+        plugin._call_llm_safety = AsyncMock(
+            return_value='{"safe": false, "reason": "Unsafe instructions"}'
+        )
+        event = SimpleNamespace(
+            message_obj=SimpleNamespace(message_id="safety-language-1"),
+            unified_msg_origin="aiocqhttp:group:1",
+            get_sender_name=lambda: "tester",
+            get_sender_id=lambda: "user-1",
+        )
+
+        allowed, reason = await plugin._passes_llm_safety_check(
+            event,
+            "危险内容",
+            "discord:ChannelMessage:987654",
+            "English",
+            True,
+        )
+
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "Unsafe instructions")
+        call_kwargs = plugin._call_llm_safety.call_args.kwargs
+        self.assertIn("must be written in English", call_kwargs["cfg"]["system_prompt"])
+        self.assertIn("reason 必须使用 English", call_kwargs["prompt"])
+        payload_text = call_kwargs["prompt"].split("审核载荷：", 1)[1]
+        payload = json.loads(payload_text)
+        self.assertTrue(payload["translation_enabled"])
+        self.assertEqual(payload["review_output_language"], "English")
+
+    async def test_safety_block_notice_uses_non_chinese_language(self):
+        reply = AsyncMock()
+        plugin = object.__new__(MsgTransfer)
+        event = SimpleNamespace(
+            message_obj=SimpleNamespace(raw_message=SimpleNamespace(reply=reply))
+        )
+
+        await plugin._reply_safety_block(
+            event,
+            "discord:ChannelMessage:987654",
+            "Potentially harmful instructions",
+            "English",
+        )
+
+        notice = reply.await_args.args[0]
+        self.assertIn("Your message was not forwarded", notice)
+        self.assertNotIn("你的消息", notice)
 
     # ------------------------------------------------------------------ #
     # 翻译功能测试
