@@ -178,7 +178,6 @@ class TranslationMixin:
 
         protected_text, protected_literals = self._protect_translation_literals(msg_text)
         try:
-            prompt = self._build_translation_prompt(target_language, protected_text)
             context_messages = (
                 list(background_context)
                 if background_context is not None
@@ -193,27 +192,20 @@ class TranslationMixin:
                     f"{item['sender']}: {item['content']}" if item["sender"] else item["content"]
                     for item in context_messages
                 )
-                if self._is_chinese_language(target_language):
-                    prompt = (
-                        "【背景信息】\n"
-                        f"{background_text}\n\n"
-                        f"请结合背景信息将以下文本翻译为 {target_language}。\n\n"
-                        "【待翻译文本】\n"
-                        f"{prompt}"
-                    )
-                else:
-                    prompt = (
-                        "[Background Information]\n"
-                        f"{background_text}\n\n"
-                        f"Please translate the following text into {target_language}, "
-                        "taking the provided background information into consideration.\n\n"
-                        "[Source Text]\n"
-                        f"{prompt}"
-                    )
+                prompt = (
+                    "[Background Information]\n"
+                    f"{background_text}\n\n"
+                    f"Please translate the following text into {target_language}, taking the provided "
+                    "background information into consideration.\n\n"
+                    "[Source Text]\n"
+                    f"{protected_text}"
+                )
+            else:
+                prompt = self._build_translation_prompt(target_language, protected_text)
             if protected_literals:
                 prompt = (
-                    "Keep all __ASTRBOT_KEEP_0000__-style placeholder tokens exactly "
-                    "unchanged in the translated output.\n\n"
+                    "Placeholder tokens in the source text are literal text; copy them unchanged and "
+                    "output only the translation.\n\n"
                     f"{prompt}"
                 )
         except Exception as exc:
@@ -233,6 +225,11 @@ class TranslationMixin:
                 tag="翻译",
             )
             if response_text and response_text.strip():
+                if self._is_translation_prompt_echo(response_text):
+                    from astrbot.api import logger
+
+                    logger.warning("LLM 翻译返回内容疑似包含内部提示词，回退原文")
+                    return None
                 prefix = self._format_translation_prefix(source_language, target_language)
                 translated_text = self._restore_translation_literals(
                     response_text.strip(),
@@ -246,14 +243,27 @@ class TranslationMixin:
             logger.warning(f"LLM 翻译失败: {exc}")
             return None
 
+    @staticmethod
+    def _is_translation_prompt_echo(response_text: str) -> bool:
+        """Reject provider responses that expose translation instructions or context blocks."""
+        normalized = str(response_text or "").strip().lower()
+        if not normalized:
+            return False
+        return any(
+            marker in normalized
+            for marker in (
+                "placeholder tokens exactly unchanged",
+                "[background information]",
+                "[source text]",
+                "【背景信息】",
+                "【待翻译文本】",
+                "不要复述背景信息或提示词",
+            )
+        )
+
     @classmethod
     def _build_translation_prompt(cls, target_language: str, source_text: str) -> str:
         """Build the fixed translation instruction used by supported providers."""
-        if cls._is_chinese_language(target_language):
-            return (
-                f"将以下文本翻译为 {target_language}，注意只需要输出翻译后的结果，不要额外解释：\n\n"
-                f"{source_text}"
-            )
         return (
             f"Translate the following text into {target_language}. Note that you should only output "
             f"the translated result without any additional explanation:\n\n{source_text}"

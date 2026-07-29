@@ -1160,16 +1160,46 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Alice: 前面的内容", prompt)
         self.assertIn("[Source Text]", prompt)
         self.assertIn("当前内容", prompt)
-        self.assertIn("Translate the following text into English", prompt)
+        self.assertIn("Please translate the following text into English", prompt)
 
-    async def test_translation_context_uses_chinese_background_template(self):
+    async def test_translation_uses_explicit_background_context_by_default(self):
+        plugin = object.__new__(MsgTransfer)
+        plugin._call_llm = AsyncMock(return_value="translated")
+        plugin.plugin_config = {"llm_translation": {"enabled": True}}
+        event = SimpleNamespace(
+            message_obj=SimpleNamespace(message_id="ctx-explicit"),
+            unified_msg_origin="aiocqhttp:GroupMessage:context-explicit",
+        )
+        rule = {
+            "source_umo": "aiocqhttp:GroupMessage:context-explicit",
+            "translation": {
+                "enabled": True,
+                "target_language": "English",
+            },
+        }
+
+        await plugin._translate_message(
+            event,
+            "当前内容",
+            rule,
+            background_context=[
+                {"sender": "", "content": "【Nested Forward 1.1】 Alice: 前后文"},
+            ],
+        )
+
+        prompt = plugin._call_llm.call_args.kwargs["prompt"]
+        self.assertIn("[Background Information]", prompt)
+        self.assertIn("【Nested Forward 1.1】 Alice: 前后文", prompt)
+        self.assertIn("[Source Text]", prompt)
+
+    async def test_translation_context_uses_english_background_template_for_chinese_target(self):
         plugin = object.__new__(MsgTransfer)
         plugin._call_llm = AsyncMock(return_value="翻译结果")
         plugin.plugin_config = {
             "llm_translation": {
                 "enabled": True,
                 "use_recent_context": True,
-                "system_prompt": "将以下文本翻译为 {target_lang}：{source_text}",
+                "system_prompt": "Translate the following text into {target_lang}: {source_text}",
             }
         }
         rule = {
@@ -1190,10 +1220,14 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
         await plugin._translate_message(make_event("ctx-zh-2"), "当前", rule)
 
         prompt = plugin._call_llm.call_args_list[1].kwargs["prompt"]
-        self.assertIn("【背景信息】", prompt)
-        self.assertIn("请结合背景信息将以下文本翻译为 Chinese", prompt)
-        self.assertIn("【待翻译文本】", prompt)
-        self.assertIn("将以下文本翻译为 Chinese，注意只需要输出翻译后的结果", prompt)
+        self.assertIn("[Background Information]\n用户: 前文", prompt)
+        self.assertIn(
+            "Please translate the following text into Chinese, taking the provided background information into consideration.",
+            prompt,
+        )
+        self.assertIn("[Source Text]\n当前", prompt)
+        self.assertNotIn("【背景信息】", prompt)
+        self.assertNotIn("请结合背景信息", prompt)
 
     def test_translation_context_keeps_last_five_and_deduplicates_current_message(self):
         plugin = object.__new__(MsgTransfer)
@@ -1444,7 +1478,37 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, "(从英文翻译)Hola")
         prompt = plugin._call_llm.call_args[1]["prompt"]
-        self.assertIn("将以下文本翻译为 Chinese，注意只需要输出翻译后的结果", prompt)
+        self.assertIn(
+            "Translate the following text into Chinese. Note that you should only output the translated result without any additional explanation:",
+            prompt,
+        )
+
+    async def test_translation_prompt_echo_falls_back_to_original(self):
+        plugin = object.__new__(MsgTransfer)
+        plugin._call_llm = AsyncMock(
+            return_value=(
+                "Keep all __ASTRBOT_KEEP_0000__-style placeholder tokens exactly unchanged "
+                "in the translated output.\n\n"
+                "[Background Information]\nAlice: context\n\n"
+                "[Source Text]\nHello"
+            )
+        )
+        plugin.plugin_config = {"llm_translation": {"enabled": True}}
+        event = SimpleNamespace(
+            message_obj=SimpleNamespace(message_id="prompt-echo-1"),
+            unified_msg_origin="discord:channel:prompt-echo",
+        )
+        rule = {
+            "translation": {
+                "enabled": True,
+                "source_language": "English",
+                "target_language": "Chinese",
+            }
+        }
+
+        result = await plugin._translate_message(event, "Hello", rule)
+
+        self.assertIsNone(result)
 
     async def test_translation_empty_text_returns_none(self):
         plugin = object.__new__(MsgTransfer)
