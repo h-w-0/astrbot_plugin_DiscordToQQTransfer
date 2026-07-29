@@ -67,6 +67,10 @@ _BELARUSIAN_HINT_RE = re.compile(r"[\u040e\u045e]")
 _ASCII_LETTER_RE = re.compile(r"[A-Za-z]")
 _URL_RE = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
 _DISCORD_MARKUP_RE = re.compile(r"<(?:(?:@!?|@&|#)\d+|a?:[^:>]+:\d+)>")
+_TRANSLATION_LITERAL_RE = re.compile(
+    r"__ASTRBOT_AT_\d+__|<(?:(?:@!?|@&|#)\d+|a?:[^:>]+:\d+)>",
+    re.IGNORECASE,
+)
 _SHORT_ASCII_ENGLISH_MAX_LETTERS = 12
 _SHORT_CYRILLIC_RUSSIAN_MAX_LETTERS = 12
 
@@ -636,7 +640,11 @@ class MsgTransfer(star.Star):
             logger.error(f"❌ 转发逻辑异常: {e}", exc_info=True)
         finally:
             if output_completion is not None:
-                self._complete_source_output_slot(source_umo, output_completion)
+                self._complete_source_output_slot(
+                    source_umo,
+                    output_predecessor,
+                    output_completion,
+                )
 
     def _reserve_source_output_slot(
         self,
@@ -655,14 +663,25 @@ class MsgTransfer(star.Star):
     def _complete_source_output_slot(
         self,
         source_umo: str,
+        output_predecessor: asyncio.Future | None,
         output_completion: asyncio.Future,
     ) -> None:
-        if not output_completion.done():
-            output_completion.set_result(None)
+        def complete_after_predecessor(_completed_predecessor=None) -> None:
+            if not output_completion.done():
+                output_completion.set_result(None)
 
-        output_tails = getattr(self, "_source_output_tails", None)
-        if output_tails and output_tails.get(source_umo) is output_completion:
-            del output_tails[source_umo]
+            output_tails = getattr(self, "_source_output_tails", None)
+            if output_tails and output_tails.get(source_umo) is output_completion:
+                del output_tails[source_umo]
+
+        # A message may finish without reaching the send gate (for example when
+        # translation fails). Keep its completion chained to the previous slot
+        # so later messages still cannot overtake that previous output.
+        if output_predecessor is not None and not output_predecessor.done():
+            output_predecessor.add_done_callback(complete_after_predecessor)
+            return
+
+        complete_after_predecessor()
 
     @staticmethod
     async def _wait_for_source_output(output_predecessor: asyncio.Future | None) -> None:
@@ -1309,10 +1328,18 @@ class MsgTransfer(star.Star):
         if not source_language:
             source_language = self._detect_source_language(msg_text)
 
+        protected_text, protected_literals = self._protect_translation_literals(msg_text)
+
         try:
-            prompt = template.replace("{source_text}", msg_text)
+            prompt = template.replace("{source_text}", protected_text)
             prompt = prompt.replace("{target_language}", target_language)
             prompt = prompt.replace("{source_language}", source_language)
+            if protected_literals:
+                prompt = (
+                    "Keep all __ASTRBOT_KEEP_0000__-style placeholder tokens "
+                    "exactly unchanged in the translated output.\n\n"
+                    f"{prompt}"
+                )
         except Exception as e:
             logger.warning(f"翻译提示词模板替换失败: {e}")
             return None
@@ -1330,11 +1357,47 @@ class MsgTransfer(star.Star):
             )
             if response_text and response_text.strip():
                 prefix = self._format_translation_prefix(source_language, target_language)
-                return f"{prefix}{response_text.strip()}"
+                translated_text = self._restore_translation_literals(
+                    response_text.strip(),
+                    protected_literals,
+                )
+                return f"{prefix}{translated_text}"
             return None
         except llm_provider_error_types as e:
             logger.warning(f"LLM 翻译失败: {e}")
             return None
+
+    @staticmethod
+    def _protect_translation_literals(text: str) -> tuple[str, dict[str, str]]:
+        """Replace mentions with stable tokens so the model cannot translate them."""
+        protected_literals: dict[str, str] = {}
+
+        def replace_literal(match: re.Match) -> str:
+            index = len(protected_literals)
+            token = f"__ASTRBOT_KEEP_{index:04d}__"
+            while token in text or token in protected_literals:
+                index += 1
+                token = f"__ASTRBOT_KEEP_{index:04d}__"
+            protected_literals[token] = match.group(0)
+            return token
+
+        return _TRANSLATION_LITERAL_RE.sub(replace_literal, text), protected_literals
+
+    @staticmethod
+    def _restore_translation_literals(text: str, protected_literals: dict[str, str]) -> str:
+        """Restore protected mentions and retain them if a model drops a token."""
+        restored = text
+        missing_literals = []
+        for token, literal in protected_literals.items():
+            restored, count = re.subn(
+                re.escape(token),
+                lambda _match, value=literal: value,
+                restored,
+                flags=re.IGNORECASE,
+            )
+            if count == 0:
+                missing_literals.append(literal)
+        return "".join(missing_literals) + restored
 
     @staticmethod
     def _detect_source_language(text: str) -> str:
@@ -1345,7 +1408,7 @@ class MsgTransfer(star.Star):
         # URLs, Discord mentions and custom emoji contain Latin characters but
         # do not express the message language.
         sample = _URL_RE.sub(" ", text)
-        sample = _DISCORD_MARKUP_RE.sub(" ", sample)
+        sample = _TRANSLATION_LITERAL_RE.sub(" ", sample)
         sample = " ".join(sample.split())
         if not sample or not any(char.isalpha() for char in sample):
             return "Unknown"
@@ -1666,7 +1729,14 @@ class MsgTransfer(star.Star):
         return reply_to_discord_id, discord_sender_id, jump_url
 
     @staticmethod
-    def _replace_ats(message_chain, discord_sender_id, discord_sender_name, mapping, self_id):
+    def _replace_ats(
+        message_chain,
+        discord_sender_id,
+        discord_sender_name,
+        mapping,
+        self_id,
+        protected_mentions: dict[str, str] | None = None,
+    ):
         """将 At(QQ) 替换为 Discord 兼容的提及格式"""
         new_chain = []
         for seg in message_chain:
@@ -1674,12 +1744,22 @@ class MsgTransfer(star.Star):
                 qq_id = str(seg.qq)
                 if self_id and qq_id == self_id:
                     if discord_sender_id:
-                        new_chain.append(Plain(text=f"<@{discord_sender_id}> "))
+                        mention_text = f"<@{discord_sender_id}> "
                     elif discord_sender_name:
-                        new_chain.append(Plain(text=f"@{discord_sender_name} "))
+                        mention_text = f"@{discord_sender_name} "
+                    else:
+                        mention_text = ""
                 else:
                     qq_name = mapping.get(qq_id, qq_id)
-                    new_chain.append(Plain(text=f"@{qq_name} "))
+                    mention_text = f"@{qq_name} "
+
+                if mention_text:
+                    if protected_mentions is not None:
+                        token = f"__ASTRBOT_AT_{len(protected_mentions)}__"
+                        protected_mentions[token] = mention_text
+                        new_chain.append(Plain(text=token))
+                    else:
+                        new_chain.append(Plain(text=mention_text))
             elif seg.__class__.__name__ in ("Quote", "Reply"):
                 continue
             else:
@@ -1736,7 +1816,15 @@ class MsgTransfer(star.Star):
             )
 
             # Step 4: 替换 @提及
-            new_chain = self._replace_ats(message_chain, discord_sender_id, discord_sender_name, mapping, self_id)
+            protected_mentions: dict[str, str] = {}
+            new_chain = self._replace_ats(
+                message_chain,
+                discord_sender_id,
+                discord_sender_name,
+                mapping,
+                self_id,
+                protected_mentions,
+            )
 
             # Step 5-6: 构建 webhook 内容（含引用块）和 embeds
             virtual_username = DiscordWebhookManager.build_virtual_username(sender_name, source_platform)
@@ -1752,6 +1840,7 @@ class MsgTransfer(star.Star):
                 translated = await self._translate_message(event, raw_content, rule)
             if translated:
                 raw_content = translated
+            raw_content = self._restore_translation_literals(raw_content, protected_mentions)
 
             content = self._build_webhook_quote(raw_content, reply_to_discord_id, jump_url, quote_text, quote_sender)
             embeds = [{"image": {"url": url}} for url in image_urls[:10]]  # Discord 最多 10 个 embed

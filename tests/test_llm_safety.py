@@ -139,6 +139,41 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(sent_messages, ["translated:first", "translated:second"])
 
+    async def test_completed_middle_slot_cannot_break_source_output_order(self):
+        plugin = object.__new__(MsgTransfer)
+
+        first_predecessor, first_completion = plugin._reserve_source_output_slot("source")
+        second_predecessor, second_completion = plugin._reserve_source_output_slot("source")
+        third_predecessor, third_completion = plugin._reserve_source_output_slot("source")
+
+        # The middle message can finish early when translation fails or produces
+        # no output. Its completion must remain behind the still-running first.
+        plugin._complete_source_output_slot(
+            "source",
+            second_predecessor,
+            second_completion,
+        )
+        plugin._complete_source_output_slot(
+            "source",
+            third_predecessor,
+            third_completion,
+        )
+
+        self.assertFalse(second_completion.done())
+        self.assertFalse(third_completion.done())
+
+        plugin._complete_source_output_slot(
+            "source",
+            first_predecessor,
+            first_completion,
+        )
+        await asyncio.wait_for(asyncio.shield(third_completion), timeout=1)
+
+        self.assertTrue(first_completion.done())
+        self.assertTrue(second_completion.done())
+        self.assertTrue(third_completion.done())
+        self.assertEqual(plugin._source_output_tails, {})
+
     async def test_openai_provider_error_follows_allow_on_error_config(self):
         plugin = object.__new__(MsgTransfer)
         plugin.context = DummyContext()
@@ -831,6 +866,74 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call_kwargs["tag"], "翻译")
         # 验证 system_prompt 被清空（Hy-MT2 兼容）
         self.assertEqual(call_kwargs["cfg"]["system_prompt"], "")
+
+    async def test_translation_protects_discord_mentions_from_llm(self):
+        plugin = object.__new__(MsgTransfer)
+
+        async def translate_with_placeholder(**kwargs):
+            prompt = kwargs["prompt"]
+            self.assertNotIn("<@123456>", prompt)
+            token_match = re.search(r"__ASTRBOT_KEEP_\d+__", prompt)
+            self.assertIsNotNone(token_match)
+            return f"{token_match.group(0)} Hello"
+
+        plugin._call_llm = AsyncMock(side_effect=translate_with_placeholder)
+        plugin.plugin_config = {
+            "llm_translation": {
+                "enabled": True,
+                "system_prompt": "Translate into {target_language}: {source_text}",
+            }
+        }
+        event = SimpleNamespace(
+            message_obj=SimpleNamespace(message_id="mention-1"),
+            unified_msg_origin="aiocqhttp:group:1",
+        )
+        rule = {
+            "translation": {
+                "enabled": True,
+                "source_language": "Chinese",
+                "target_language": "English",
+            }
+        }
+
+        result = await plugin._translate_message(event, "<@123456> 你好", rule)
+
+        self.assertEqual(result, "(Translated from Chinese)<@123456> Hello")
+
+    def test_qq_at_name_is_hidden_from_translation_and_restored(self):
+        plugin = object.__new__(MsgTransfer)
+        at_segment = type("At", (), {"qq": "42"})()
+        protected_mentions = {}
+
+        chain = plugin._replace_ats(
+            [at_segment],
+            discord_sender_id=None,
+            discord_sender_name=None,
+            mapping={"42": "AddCraft Java Magic"},
+            self_id="bot-id",
+            protected_mentions=protected_mentions,
+        )
+
+        self.assertEqual(chain[0].text, "__ASTRBOT_AT_0__")
+        self.assertEqual(
+            protected_mentions,
+            {"__ASTRBOT_AT_0__": "@AddCraft Java Magic "},
+        )
+        self.assertEqual(
+            plugin._restore_translation_literals(
+                "(Translated from Chinese)__ASTRBOT_AT_0__What does mana mean?",
+                protected_mentions,
+            ),
+            "(Translated from Chinese)@AddCraft Java Magic What does mana mean?",
+        )
+
+    def test_dropped_translation_placeholder_keeps_original_mention(self):
+        restored = MsgTransfer._restore_translation_literals(
+            "Hello",
+            {"__ASTRBOT_KEEP_0000__": "<@123456>"},
+        )
+
+        self.assertEqual(restored, "<@123456>Hello")
 
     def test_translation_prefix_uses_target_language(self):
         self.assertEqual(
