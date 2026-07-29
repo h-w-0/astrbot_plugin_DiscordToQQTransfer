@@ -525,7 +525,7 @@ class MsgTransfer(star.Star):
 
         self.store = MsgTransferStore(self.webhook_file, self.mapping_file, self.msg_mapping_file, self.forward_log_file)
         self.webhook_manager = DiscordWebhookManager(context)
-        self._source_output_tails: dict[str, asyncio.Future] = {}
+        self._target_output_tails: dict[str, asyncio.Future] = {}
 
     def _get_config_forward_rules(self) -> dict:
         """读取 Dashboard 中配置的消息转发规则"""
@@ -622,19 +622,28 @@ class MsgTransfer(star.Star):
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def forward_message(self, event: AstrMessageEvent):
-        """主转发逻辑 - LLM 可并发处理，输出按来源消息顺序发送。"""
+        """主转发逻辑 - LLM 可并发处理，同一目标的输出按进入顺序发送。"""
         source_umo = ""
-        output_completion = None
+        output_slots: dict[str, tuple[asyncio.Future | None, asyncio.Future]] = {}
+        completed_targets: set[str] = set()
         try:
             if self._is_notice_event(event):
                 logger.debug("忽略 notice 事件，不参与消息转发")
                 return
 
             source_umo = str(event.unified_msg_origin)
-            output_predecessor, output_completion = self._reserve_source_output_slot(source_umo)
             rules = await self._list_forward_rules(source_umo)
             if not rules:
                 return
+
+            # Reserve every destination before doing any LLM or I/O work. This
+            # keeps events targeting the same channel ordered even when their
+            # source UMO values differ or their translations finish out of order.
+            for rule in rules.values():
+                target_umo = str(rule["target_umo"])
+                if target_umo not in output_slots:
+                    output_slots[target_umo] = self._reserve_target_output_slot(target_umo)
+
             message_chain = event.get_messages()
             # 记录从 Discord 转发的消息，供 QQ 回复引用时还原跳转链接
             platform = event.get_platform_name()
@@ -646,41 +655,52 @@ class MsgTransfer(star.Star):
                         await self.store.add_forward_log(str(discord_msg_id), msg_text, event.get_sender_id())
             # 顺序依次await每个转发，保证顺序
             for rid, rule in rules.items():
-                await self._forward_single_rule(
-                    event,
-                    rule,
-                    rid,
-                    source_umo,
-                    message_chain,
-                    output_predecessor=output_predecessor,
-                )
+                target_umo = str(rule["target_umo"])
+                output_predecessor, output_completion = output_slots[target_umo]
+                try:
+                    await self._forward_single_rule(
+                        event,
+                        rule,
+                        rid,
+                        source_umo,
+                        message_chain,
+                        output_predecessor=output_predecessor,
+                    )
+                finally:
+                    self._complete_target_output_slot(
+                        target_umo,
+                        output_predecessor,
+                        output_completion,
+                    )
+                    completed_targets.add(target_umo)
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError, KeyError) as e:
             logger.error(f"❌ 转发逻辑异常: {e}", exc_info=True)
         finally:
-            if output_completion is not None:
-                self._complete_source_output_slot(
-                    source_umo,
-                    output_predecessor,
-                    output_completion,
-                )
+            for target_umo, (output_predecessor, output_completion) in output_slots.items():
+                if target_umo not in completed_targets:
+                    self._complete_target_output_slot(
+                        target_umo,
+                        output_predecessor,
+                        output_completion,
+                    )
 
-    def _reserve_source_output_slot(
+    def _reserve_target_output_slot(
         self,
-        source_umo: str,
+        target_umo: str,
     ) -> tuple[asyncio.Future | None, asyncio.Future]:
-        output_tails = getattr(self, "_source_output_tails", None)
+        output_tails = getattr(self, "_target_output_tails", None)
         if output_tails is None:
             output_tails = {}
-            self._source_output_tails = output_tails
+            self._target_output_tails = output_tails
 
         output_completion = asyncio.get_running_loop().create_future()
-        output_predecessor = output_tails.get(source_umo)
-        output_tails[source_umo] = output_completion
+        output_predecessor = output_tails.get(target_umo)
+        output_tails[target_umo] = output_completion
         return output_predecessor, output_completion
 
-    def _complete_source_output_slot(
+    def _complete_target_output_slot(
         self,
-        source_umo: str,
+        target_umo: str,
         output_predecessor: asyncio.Future | None,
         output_completion: asyncio.Future,
     ) -> None:
@@ -688,9 +708,9 @@ class MsgTransfer(star.Star):
             if not output_completion.done():
                 output_completion.set_result(None)
 
-            output_tails = getattr(self, "_source_output_tails", None)
-            if output_tails and output_tails.get(source_umo) is output_completion:
-                del output_tails[source_umo]
+            output_tails = getattr(self, "_target_output_tails", None)
+            if output_tails and output_tails.get(target_umo) is output_completion:
+                del output_tails[target_umo]
 
         # A message may finish without reaching the send gate (for example when
         # translation fails). Keep its completion chained to the previous slot
@@ -702,7 +722,7 @@ class MsgTransfer(star.Star):
         complete_after_predecessor()
 
     @staticmethod
-    async def _wait_for_source_output(output_predecessor: asyncio.Future | None) -> None:
+    async def _wait_for_target_output(output_predecessor: asyncio.Future | None) -> None:
         if output_predecessor is not None:
             await output_predecessor
 
@@ -755,7 +775,7 @@ class MsgTransfer(star.Star):
                 )
                 if not allowed:
                     logger.warning(f"转发 #{rid} 被内容安全筛查拦截: {target}")
-                    await self._wait_for_source_output(output_predecessor)
+                    await self._wait_for_target_output(output_predecessor)
                     await self._reply_safety_block(
                         event,
                         target,
@@ -806,7 +826,7 @@ class MsgTransfer(star.Star):
 
                 # Discord 端回复消息时，检测引用关系并还原 QQ 引用链
                 chain = await self._build_discord_reply_chain(event, source_platform_name, sender_name, msg_text, full_text)
-                await self._wait_for_source_output(output_predecessor)
+                await self._wait_for_target_output(output_predecessor)
                 sent, sent_result = await self._send_message_with_result(target, chain)
                 if sent:
                     await self._record_discord_to_target_mapping(event, sent_result, source_platform_name)
@@ -1970,7 +1990,7 @@ class MsgTransfer(star.Star):
                 content = "[图片]"
 
             # Step 7: 发送并记录映射
-            await self._wait_for_source_output(output_predecessor)
+            await self._wait_for_target_output(output_predecessor)
             discord_msg_id = await self.webhook_manager.send_webhook_message(
                 webhook_url=webhook_url,
                 username=virtual_username,

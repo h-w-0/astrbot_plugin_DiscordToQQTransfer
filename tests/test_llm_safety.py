@@ -77,7 +77,7 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
 
         plugin._list_forward_rules.assert_awaited_once()
 
-    async def test_same_source_messages_keep_send_order_while_llm_runs_concurrently(self):
+    async def test_same_target_messages_keep_send_order_across_sources(self):
         plugin = object.__new__(MsgTransfer)
         plugin._list_forward_rules = AsyncMock(
             return_value={
@@ -113,9 +113,9 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
         plugin._send_message_with_result = AsyncMock(side_effect=send_message)
         plugin._record_discord_to_target_mapping = AsyncMock()
 
-        def make_event(message_id: str):
+        def make_event(message_id: str, source_umo: str):
             return SimpleNamespace(
-                unified_msg_origin="test:channel:1",
+                unified_msg_origin=source_umo,
                 message_obj=SimpleNamespace(
                     message_id=message_id,
                     raw_message={"post_type": "message"},
@@ -126,9 +126,13 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
                 get_sender_id=lambda: "user-1",
             )
 
-        first_task = asyncio.create_task(plugin.forward_message(make_event("first")))
+        first_task = asyncio.create_task(
+            plugin.forward_message(make_event("first", "test:channel:source-a"))
+        )
         await asyncio.wait_for(first_translation_started.wait(), timeout=1)
-        second_task = asyncio.create_task(plugin.forward_message(make_event("second")))
+        second_task = asyncio.create_task(
+            plugin.forward_message(make_event("second", "test:channel:source-b"))
+        )
         await asyncio.wait_for(second_translation_finished.wait(), timeout=1)
         await asyncio.sleep(0)
 
@@ -139,22 +143,22 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(sent_messages, ["translated:first", "translated:second"])
 
-    async def test_completed_middle_slot_cannot_break_source_output_order(self):
+    async def test_completed_middle_slot_cannot_break_target_output_order(self):
         plugin = object.__new__(MsgTransfer)
 
-        first_predecessor, first_completion = plugin._reserve_source_output_slot("source")
-        second_predecessor, second_completion = plugin._reserve_source_output_slot("source")
-        third_predecessor, third_completion = plugin._reserve_source_output_slot("source")
+        first_predecessor, first_completion = plugin._reserve_target_output_slot("target")
+        second_predecessor, second_completion = plugin._reserve_target_output_slot("target")
+        third_predecessor, third_completion = plugin._reserve_target_output_slot("target")
 
         # The middle message can finish early when translation fails or produces
         # no output. Its completion must remain behind the still-running first.
-        plugin._complete_source_output_slot(
-            "source",
+        plugin._complete_target_output_slot(
+            "target",
             second_predecessor,
             second_completion,
         )
-        plugin._complete_source_output_slot(
-            "source",
+        plugin._complete_target_output_slot(
+            "target",
             third_predecessor,
             third_completion,
         )
@@ -162,8 +166,8 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(second_completion.done())
         self.assertFalse(third_completion.done())
 
-        plugin._complete_source_output_slot(
-            "source",
+        plugin._complete_target_output_slot(
+            "target",
             first_predecessor,
             first_completion,
         )
@@ -172,7 +176,7 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(first_completion.done())
         self.assertTrue(second_completion.done())
         self.assertTrue(third_completion.done())
-        self.assertEqual(plugin._source_output_tails, {})
+        self.assertEqual(plugin._target_output_tails, {})
 
     async def test_openai_provider_error_follows_allow_on_error_config(self):
         plugin = object.__new__(MsgTransfer)
