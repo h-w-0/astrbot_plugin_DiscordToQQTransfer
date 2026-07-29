@@ -1,0 +1,2 @@
+"""MsgTransfer plugin domain modules."""
+

@@ -108,11 +108,21 @@ Discord: mmyddd: 2
 astrbot_plugin_msg_transfer/
 ├── LICENSE
 ├── README.md
-├── main.py          # 插件主逻辑
+├── main.py          # AstrBot 入口与依赖初始化
+├── modules/
+│   ├── config.py              # Dashboard 规则与配置归一化
+│   ├── storage.py             # 异步 JSON 存储、消息映射与转发日志
+│   ├── translation.py         # 翻译、语言检测与上下文
+│   ├── llm.py                 # LLM 供应商调用与内容安全审核
+│   ├── message_processing.py  # 消息组件、合并转发与引用处理
+│   ├── discord_forwarding.py  # Discord Webhook、Thread 与回复链
+│   └── forwarding.py          # AstrBot 事件入口和转发编排
 ├── webhook.py       # Discord Webhook 管理模块
 ├── metadata.yaml
 └── requirements.txt
 ```
+
+`main.py` 通过按领域拆分的 Mixin 组合出 `MsgTransfer`，因此新增功能时可以在对应子模块中修改，AstrBot 的加载入口和既有调用接口保持不变。
 
 ---
 
