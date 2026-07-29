@@ -325,6 +325,53 @@ class MergedForwardTests(IsolatedAsyncioTestCase):
         self.assertNotIn("None", content)
         plugin._translate_message.assert_awaited_once()
 
+    async def test_translation_localizes_forward_headers_without_translating_usernames(self):
+        plugin = make_plugin()
+        plugin.plugin_config = {"llm_translation": {"enabled": True}}
+        plugin._translate_message = AsyncMock(return_value="translated")
+        rule = {
+            "translation": {
+                "enabled": True,
+                "target_language": "English",
+                "translate_forward_records": True,
+            }
+        }
+
+        root_content, _, _ = await plugin._prepare_merged_forward_unit(
+            make_event(),
+            {
+                "path": (1,),
+                "depth": 0,
+                "sender": "新月",
+                "components": [
+                    FakePlain("original"),
+                    {"type": "mface", "data": {}},
+                ],
+            },
+            rule,
+            {},
+        )
+        nested_content, _, _ = await plugin._prepare_merged_forward_unit(
+            make_event(),
+            {
+                "path": (1, 1),
+                "depth": 1,
+                "sender": "Muddy",
+                "components": [FakePlain("nested")],
+            },
+            rule,
+            {},
+        )
+
+        self.assertIn("Forward Record 1", root_content)
+        self.assertIn("Nested Forward 1.1", nested_content)
+        self.assertIn("新月 (QQ)", root_content)
+        self.assertIn("Muddy (QQ)", nested_content)
+        self.assertIn("[Emoji]", root_content)
+        self.assertNotIn("转发记录", root_content)
+        self.assertNotIn("嵌套转发", nested_content)
+        self.assertEqual(plugin._translate_message.await_count, 2)
+
     async def test_thread_creation_and_ordered_sending(self):
         plugin = make_plugin()
         plugin.webhook_manager = SimpleNamespace(

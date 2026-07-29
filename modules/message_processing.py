@@ -611,16 +611,57 @@ class MessageProcessingMixin:
         uin = str(uin or "").strip()
         return name or uin or "未知用户"
 
-    @staticmethod
-    def _merged_forward_header(unit: dict) -> str:
+    def _merged_forward_header(self, unit: dict, target_language: str = "Chinese") -> str:
         path = unit.get("path") or ()
-        path_text = ".".join(str(value) for value in path) or "附加"
+        path_text = ".".join(str(value) for value in path) or self._merged_forward_label(
+            "additional", target_language
+        )
         depth = max(0, int(unit.get("depth", 0) or 0))
-        label = "嵌套转发" if depth else "转发记录"
+        label = self._merged_forward_label(
+            "nested_forward" if depth else "forward_record",
+            target_language,
+        )
         if unit.get("continuation"):
-            path_text += " 续"
+            path_text += f" {self._merged_forward_label('continued', target_language)}"
         indent = "↳ " * depth
         return f"{indent}【{label} {path_text}】 {unit.get('sender') or '未知用户'} (QQ)"
+
+    def _merged_forward_label(self, key: str, target_language: str = "Chinese") -> str:
+        labels = {
+            "forward_record": ("转发记录", "Forward Record"),
+            "nested_forward": ("嵌套转发", "Nested Forward"),
+            "additional": ("附加", "Additional"),
+            "continued": ("续", "continued"),
+            "mention": ("[艾特]", "[Mention]"),
+            "emoji": ("[表情]", "[Emoji]"),
+            "image": ("[图片]", "[Image]"),
+            "file": ("文件", "File"),
+            "quote": ("[引用]", "[Quote]"),
+            "audio": ("[语音]", "[Audio]"),
+            "video": ("[视频]", "[Video]"),
+            "unsupported": ("不支持的消息类型", "Unsupported message type"),
+        }
+        chinese, english = labels.get(key, (key, key))
+        return chinese if self._is_chinese_language(target_language) else english
+
+    def _localize_merged_forward_placeholder(
+        self,
+        placeholder: str | None,
+        target_language: str = "Chinese",
+    ) -> str | None:
+        if not placeholder or self._is_chinese_language(target_language):
+            return placeholder
+        localized = str(placeholder)
+        replacements = (
+            ("[空合并转发]", "[Empty merged forward]"),
+            ("[无法解析的嵌套转发节点]", "[Unparseable nested forward node]"),
+            ("[合并转发解析失败: 缺少记录 ID]", "[Merged forward parsing failed: missing record ID]"),
+            ("[合并转发循环引用: ", "[Circular merged-forward reference: "),
+            ("[合并转发解析失败: ", "[Merged forward parsing failed: "),
+        )
+        for source, translated in replacements:
+            localized = localized.replace(source, translated)
+        return localized
 
     def _append_forward_node_units(
         self,
@@ -818,13 +859,19 @@ class MessageProcessingMixin:
                 )
         return "\n".join(text_lines)
 
-    def _format_merged_component_content(self, components) -> str:
+    def _format_merged_component_content(
+        self,
+        components,
+        target_language: str = "Chinese",
+    ) -> str:
         """Format merged-forward components and keep unsupported types visible."""
         renderable_components = []
         for component in components:
             kind = self._component_kind(component)
             if kind in {"face", "mface", "marketface", "market_face", "superface", "super_face"}:
-                renderable_components.append(Plain(text="[表情]"))
+                renderable_components.append(
+                    Plain(text=self._merged_forward_label("emoji", target_language))
+                )
                 continue
             if not isinstance(component, dict):
                 renderable_components.append(component)
@@ -835,12 +882,24 @@ class MessageProcessingMixin:
                 renderable_components.append(Plain(text=str(payload.get("text") or "")))
             elif kind == "at":
                 qq = payload.get("qq") or payload.get("user_id")
-                renderable_components.append(Plain(text=f"<@{qq}>" if qq else "[艾特]"))
+                renderable_components.append(
+                    Plain(
+                        text=f"<@{qq}>"
+                        if qq
+                        else self._merged_forward_label("mention", target_language)
+                    )
+                )
             elif kind == "image":
                 source = payload.get("url") or payload.get("file") or payload.get("path")
-                renderable_components.append(Plain(text=str(source) if source else "[图片]"))
+                renderable_components.append(
+                    Plain(
+                        text=str(source)
+                        if source
+                        else self._merged_forward_label("image", target_language)
+                    )
+                )
             elif kind == "file":
-                name = payload.get("name") or "文件"
+                name = payload.get("name") or self._merged_forward_label("file", target_language)
                 source = payload.get("url") or payload.get("file") or ""
                 renderable_components.append(
                     Plain(text=f"[{name}]({source})" if source else f"[{name}]")
@@ -879,7 +938,15 @@ class MessageProcessingMixin:
                         or getattr(component, "message_str", None)
                         or getattr(component, "text", None)
                     )
-                extra_lines.append(f"[引用] {quote_text or '原消息'}")
+                original_message = (
+                    "原消息"
+                    if self._is_chinese_language(target_language)
+                    else "Original message"
+                )
+                extra_lines.append(
+                    f"{self._merged_forward_label('quote', target_language)} "
+                    f"{quote_text or original_message}"
+                )
                 continue
             if kind in {"record", "audio"}:
                 source = (
@@ -888,9 +955,9 @@ class MessageProcessingMixin:
                     or getattr(component, "path", None)
                 )
                 extra_lines.append(
-                    f"[语音]({source})"
+                    f"{self._merged_forward_label('audio', target_language)}({source})"
                     if isinstance(source, str) and source.startswith("http")
-                    else "[语音]"
+                    else self._merged_forward_label("audio", target_language)
                 )
                 continue
             if kind == "video":
@@ -900,14 +967,17 @@ class MessageProcessingMixin:
                     or getattr(component, "path", None)
                 )
                 extra_lines.append(
-                    f"[视频]({source})"
+                    f"{self._merged_forward_label('video', target_language)}({source})"
                     if isinstance(source, str) and source.startswith("http")
-                    else "[视频]"
+                    else self._merged_forward_label("video", target_language)
                 )
                 continue
 
             logger.warning(f"[MergedForward] 不支持的消息组件类型: {component.__class__.__name__}")
-            extra_lines.append(f"[不支持的消息类型: {component.__class__.__name__}]")
+            extra_lines.append(
+                f"[{self._merged_forward_label('unsupported', target_language)}: "
+                f"{component.__class__.__name__}]"
+            )
 
         if extra_lines:
             if rendered and not rendered.endswith("\n"):
@@ -923,6 +993,13 @@ class MessageProcessingMixin:
         if not isinstance(translation, dict):
             return False
         return self._coerce_config_bool(translation.get("translate_forward_records"), False)
+
+    def _merged_forward_target_language(self, rule: dict | None) -> str:
+        if not self._is_forward_record_translation_enabled(rule):
+            return "Chinese"
+        translation = rule.get("translation", {}) if isinstance(rule, dict) else {}
+        target_language = translation.get("target_language") if isinstance(translation, dict) else None
+        return str(target_language or "Chinese").strip() or "Chinese"
 
     async def _translate_forward_record_components(
         self,
@@ -1033,13 +1110,17 @@ class MessageProcessingMixin:
             drop_replies=False,
         )
         components = await self._translate_forward_record_components(event, components, rule)
-        raw_content = self._format_merged_component_content(components)
+        target_language = self._merged_forward_target_language(rule)
+        raw_content = self._format_merged_component_content(components, target_language)
         raw_content = self._restore_translation_literals(raw_content, protected_mentions)
-        placeholder = unit.get("placeholder")
+        placeholder = self._localize_merged_forward_placeholder(
+            unit.get("placeholder"),
+            target_language,
+        )
         if placeholder:
             raw_content = f"{placeholder}\n{raw_content}" if raw_content else placeholder
 
-        header = self._merged_forward_header(unit)
+        header = self._merged_forward_header(unit, target_language)
         content = f"{header}\n{raw_content}" if raw_content else header
         image_urls = DiscordWebhookManager.extract_images(components)
         local_images = DiscordWebhookManager.extract_local_image_paths(components)
