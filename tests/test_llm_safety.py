@@ -577,6 +577,10 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(translation_schema["items"]["llm_max_tokens"]["default"], 512)
         self.assertEqual(translation_schema["items"]["reasoning_effort"]["default"], "")
         self.assertIn("use_recent_context", translation_schema["items"])
+        recent_context = translation_schema["items"]["recent_context_count"]
+        self.assertEqual(recent_context["type"], "int")
+        self.assertEqual(recent_context["default"], 5)
+        self.assertEqual(recent_context["slider"], {"min": 0, "max": 20, "step": 1})
         self.assertNotIn("system_prompt", translation_schema["items"])
         # 验证翻译供应商模板与安全筛查一致
         tl_providers = translation_schema["items"]["llm_providers"]
@@ -1263,6 +1267,46 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
             ["message-2", "message-3", "message-4", "message-5", "message-6"],
         )
 
+    def test_translation_context_count_controls_only_prior_messages(self):
+        plugin = object.__new__(MsgTransfer)
+        plugin.plugin_config = {
+            "llm_translation": {
+                "recent_context_count": 2,
+            }
+        }
+        rule = {"source_umo": "aiocqhttp:GroupMessage:context-window-configured"}
+
+        def make_event(index):
+            return SimpleNamespace(
+                message_obj=SimpleNamespace(message_id=f"configured-{index}"),
+                unified_msg_origin="aiocqhttp:GroupMessage:context-window-configured",
+                get_sender_name=lambda: f"sender-{index}",
+            )
+
+        for index in range(1, 5):
+            context = plugin._remember_translation_context(
+                make_event(index),
+                f"message-{index}",
+                rule,
+            )
+
+        self.assertEqual(
+            [item["content"] for item in context],
+            ["message-2", "message-3"],
+        )
+
+    def test_translation_context_count_is_clamped_to_slider_range(self):
+        plugin = object.__new__(MsgTransfer)
+        plugin.plugin_config = {
+            "llm_translation": {
+                "recent_context_count": 999,
+            }
+        }
+        self.assertEqual(plugin._get_llm_translation_config()["recent_context_count"], 20)
+
+        plugin.plugin_config["llm_translation"]["recent_context_count"] = -1
+        self.assertEqual(plugin._get_llm_translation_config()["recent_context_count"], 0)
+
     async def test_translation_protects_discord_mentions_from_llm(self):
         plugin = object.__new__(MsgTransfer)
 
@@ -1634,6 +1678,7 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config["reasoning_effort"], "")
         self.assertNotIn("system_prompt", config)
         self.assertFalse(config["use_recent_context"])
+        self.assertEqual(config["recent_context_count"], 5)
 
     def test_get_llm_translation_config_merges_with_defaults(self):
         plugin = object.__new__(MsgTransfer)

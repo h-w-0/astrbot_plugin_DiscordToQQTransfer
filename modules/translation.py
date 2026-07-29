@@ -7,6 +7,8 @@ from collections import OrderedDict, deque
 
 import aiohttp
 
+from .config import DEFAULT_RECENT_CONTEXT_COUNT, MAX_RECENT_CONTEXT_COUNT
+
 try:
     from langdetect import detect as _detect_lang
 except ImportError:
@@ -130,7 +132,8 @@ def detect_source_language(text: str, detector=None) -> str:
 class TranslationMixin:
     """Translation behavior shared by webhook and platform forwarding paths."""
 
-    TRANSLATION_CONTEXT_SIZE = 5
+    TRANSLATION_CONTEXT_SIZE = DEFAULT_RECENT_CONTEXT_COUNT
+    MAX_TRANSLATION_CONTEXT_SIZE = MAX_RECENT_CONTEXT_COUNT
     MAX_TRANSLATION_CONTEXTS = 200
 
     @staticmethod
@@ -216,10 +219,12 @@ class TranslationMixin:
 
         # Hy-MT2-style providers receive all instructions in the user prompt.
         translation_config["system_prompt"] = ""
+        provider_config = dict(translation_config)
+        provider_config.pop("recent_context_count", None)
         try:
             response_text = await self._call_llm(
                 prompt=prompt,
-                cfg=translation_config,
+                cfg=provider_config,
                 session_id=self._build_translation_session_id(event),
                 umo=getattr(event, "unified_msg_origin", None),
                 tag="翻译",
@@ -275,7 +280,16 @@ class TranslationMixin:
         msg_text: str,
         rule: dict,
     ) -> list[dict[str, str]]:
-        """Return the prior five messages and remember the current one once."""
+        """Return configured prior messages and remember the current one once."""
+        context_size = self._get_llm_translation_config().get(
+            "recent_context_count",
+            self.TRANSLATION_CONTEXT_SIZE,
+        )
+        try:
+            context_size = min(self.MAX_TRANSLATION_CONTEXT_SIZE, max(0, int(context_size)))
+        except (TypeError, ValueError):
+            context_size = self.TRANSLATION_CONTEXT_SIZE
+
         contexts = getattr(self, "_translation_contexts", None)
         if contexts is None:
             contexts = OrderedDict()
@@ -284,7 +298,7 @@ class TranslationMixin:
         source_key = str(rule.get("source_umo") or getattr(event, "unified_msg_origin", ""))
         history = contexts.get(source_key)
         if history is None:
-            history = deque(maxlen=self.TRANSLATION_CONTEXT_SIZE + 1)
+            history = deque(maxlen=self.MAX_TRANSLATION_CONTEXT_SIZE + 1)
             contexts[source_key] = history
             if len(contexts) > self.MAX_TRANSLATION_CONTEXTS:
                 contexts.popitem(last=False)
@@ -293,11 +307,12 @@ class TranslationMixin:
 
         message_id = getattr(getattr(event, "message_obj", None), "message_id", None)
         message_key = str(message_id) if message_id is not None else f"event:{id(event)}"
-        recent_context = [
+        prior_messages = [
             {"sender": sender, "content": content}
             for stored_key, sender, content in history
             if stored_key != message_key
-        ][-self.TRANSLATION_CONTEXT_SIZE:]
+        ]
+        recent_context = prior_messages[-context_size:] if context_size else []
 
         if not any(stored_key == message_key for stored_key, _sender, _content in history):
             sender_getter = getattr(event, "get_sender_name", None)

@@ -22,6 +22,9 @@ DEFAULT_SAFETY_PROMPT = (
     '{"safe": true/false, "reason": "不超过30字的中文原因"}。'
 )
 
+DEFAULT_RECENT_CONTEXT_COUNT = 5
+MAX_RECENT_CONTEXT_COUNT = 20
+
 
 class ConfigMixin:
     """Expose normalized plugin configuration to the other domain mixins."""
@@ -148,6 +151,7 @@ class ConfigMixin:
         defaults = {
             "enabled": False,
             "use_recent_context": False,
+            "recent_context_count": DEFAULT_RECENT_CONTEXT_COUNT,
             "llm_providers": [],
             "timeout_seconds": 30,
             "llm_max_tokens": 512,
@@ -180,6 +184,13 @@ class ConfigMixin:
             merged.get("use_recent_context"),
             defaults["use_recent_context"],
         )
+        try:
+            merged["recent_context_count"] = min(
+                MAX_RECENT_CONTEXT_COUNT,
+                max(0, int(merged.get("recent_context_count", DEFAULT_RECENT_CONTEXT_COUNT))),
+            )
+        except (TypeError, ValueError):
+            merged["recent_context_count"] = DEFAULT_RECENT_CONTEXT_COUNT
         return merged
 
     def _get_safety_output_language(self, rule: dict) -> tuple[bool, str]:
@@ -213,4 +224,9 @@ class ConfigMixin:
         return chinese if cls._is_chinese_language(output_language) else english
 
 
-__all__ = ["ConfigMixin", "DEFAULT_SAFETY_PROMPT"]
+__all__ = [
+    "ConfigMixin",
+    "DEFAULT_SAFETY_PROMPT",
+    "DEFAULT_RECENT_CONTEXT_COUNT",
+    "MAX_RECENT_CONTEXT_COUNT",
+]

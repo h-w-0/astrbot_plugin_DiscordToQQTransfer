@@ -216,9 +216,19 @@
         "default": false
       },
       "use_recent_context": {
-        "description": "将同一来源会话最近 5 条消息作为翻译上下文，仅用于语义消歧，不要求模型翻译上下文内容。",
+        "description": "将同一来源会话的历史消息作为普通聊天翻译上下文，仅用于语义消歧，不要求模型翻译上下文内容。",
         "type": "bool",
         "default": false
+      },
+      "recent_context_count": {
+        "description": "普通聊天翻译时包含的前向上下文消息数量，仅控制当前消息之前的历史消息；不影响合并转发记录翻译的同级上下文。",
+        "type": "int",
+        "default": 5,
+        "slider": {
+          "min": 0,
+          "max": 20,
+          "step": 1
+        }
       },
       "llm_providers": {
         "description": "LLM 供应商列表（按顺序依次尝试，第一个成功的即返回翻译结果）。可在 Dashboard 中动态增删排序。",
