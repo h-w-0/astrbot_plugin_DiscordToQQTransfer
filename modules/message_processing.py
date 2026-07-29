@@ -23,6 +23,8 @@ except ImportError:
 class MessageProcessingMixin:
     """Pure message transformations shared by all forwarding paths."""
 
+    MERGED_FORWARD_CONTEXT_SIZE = 5
+
     @staticmethod
     def _component_kind(component) -> str:
         """Return a stable component type name across AstrBot versions and fakes."""
@@ -860,6 +862,61 @@ class MessageProcessingMixin:
                 )
         return "\n".join(text_lines)
 
+    @staticmethod
+    def _merged_forward_context_group(unit: dict) -> tuple:
+        """Return the parent node path so context stays within one nesting level."""
+        path = unit.get("path") or ()
+        if isinstance(path, str):
+            path = (path,)
+        return tuple(path[:-1])
+
+    def _build_merged_forward_translation_context(
+        self,
+        units: list[dict],
+        current_index: int,
+        target_language: str = "Chinese",
+    ) -> list[dict[str, str]]:
+        """Build up to five preceding/following sibling records for translation."""
+        if current_index < 0 or current_index >= len(units):
+            return []
+
+        current_group = self._merged_forward_context_group(units[current_index])
+        sibling_indices = [
+            index
+            for index, unit in enumerate(units)
+            if self._merged_forward_context_group(unit) == current_group
+        ]
+        try:
+            sibling_position = sibling_indices.index(current_index)
+        except ValueError:
+            return []
+
+        window_size = self.MERGED_FORWARD_CONTEXT_SIZE
+        context_indices = (
+            sibling_indices[max(0, sibling_position - window_size):sibling_position]
+            + sibling_indices[sibling_position + 1:sibling_position + window_size + 1]
+        )
+        context = []
+        for index in context_indices:
+            unit = units[index]
+            content = self._format_merged_component_content(
+                unit.get("components", []),
+                target_language,
+            ).strip()
+            placeholder = self._localize_merged_forward_placeholder(
+                unit.get("placeholder"),
+                target_language,
+            )
+            if placeholder:
+                content = f"{placeholder}\n{content}" if content else placeholder
+            if not content:
+                continue
+            context.append({
+                "sender": "",
+                "content": f"{self._merged_forward_header(unit, target_language)}: {content}",
+            })
+        return context
+
     def _format_merged_component_content(
         self,
         components,
@@ -1007,6 +1064,7 @@ class MessageProcessingMixin:
         event,
         components: list,
         rule: dict,
+        translation_context: list[dict[str, str]] | None = None,
     ) -> list:
         if not self._is_forward_record_translation_enabled(rule):
             return list(components)
@@ -1025,7 +1083,12 @@ class MessageProcessingMixin:
                 return
             translated_text = None
             try:
-                translated_text = await self._translate_message(event, original_text, rule)
+                translated_text = await self._translate_message(
+                    event,
+                    original_text,
+                    rule,
+                    background_context=translation_context,
+                )
             except Exception as exc:
                 logger.warning(f"[MergedForward] 转发记录文本翻译失败，回退原文: {exc}")
             translated_components.append(Plain(text=translated_text or original_text))
@@ -1099,6 +1162,7 @@ class MessageProcessingMixin:
         unit: dict,
         rule: dict,
         mapping: dict,
+        translation_context: list[dict[str, str]] | None = None,
     ) -> tuple[str, list, list[str]]:
         protected_mentions: dict[str, str] = {}
         components = self._replace_ats(
@@ -1110,7 +1174,12 @@ class MessageProcessingMixin:
             protected_mentions=protected_mentions,
             drop_replies=False,
         )
-        components = await self._translate_forward_record_components(event, components, rule)
+        components = await self._translate_forward_record_components(
+            event,
+            components,
+            rule,
+            translation_context,
+        )
         target_language = self._merged_forward_target_language(rule)
         raw_content = self._format_merged_component_content(components, target_language)
         raw_content = self._restore_translation_literals(raw_content, protected_mentions)

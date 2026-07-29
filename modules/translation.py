@@ -149,7 +149,13 @@ class TranslationMixin:
             return f"msg_transfer_translate:{message_id}"
         return f"msg_transfer_translate:{event.unified_msg_origin}:{time.time_ns()}"
 
-    async def _translate_message(self, event, msg_text: str, rule: dict) -> str | None:
+    async def _translate_message(
+        self,
+        event,
+        msg_text: str,
+        rule: dict,
+        background_context: list[dict[str, str]] | None = None,
+    ) -> str | None:
         """Translate a rule-enabled message, returning None on disabled or failed calls."""
         translation_config = self._get_llm_translation_config()
         if not translation_config.get("enabled"):
@@ -173,10 +179,19 @@ class TranslationMixin:
         protected_text, protected_literals = self._protect_translation_literals(msg_text)
         try:
             prompt = self._build_translation_prompt(target_language, protected_text)
-            if translation_config.get("use_recent_context") and recent_context:
+            context_messages = (
+                list(background_context)
+                if background_context is not None
+                else (
+                    recent_context
+                    if translation_config.get("use_recent_context")
+                    else []
+                )
+            )
+            if context_messages:
                 background_text = "\n".join(
                     f"{item['sender']}: {item['content']}" if item["sender"] else item["content"]
-                    for item in recent_context
+                    for item in context_messages
                 )
                 if self._is_chinese_language(target_language):
                     prompt = (

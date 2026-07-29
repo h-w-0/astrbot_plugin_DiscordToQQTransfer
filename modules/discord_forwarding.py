@@ -39,7 +39,8 @@ class DiscordForwardingMixin:
         sender_id = self._event_value(event, "get_sender_id")
         source_platform = self._event_value(event, "get_platform_name", "aiocqhttp")
         message_id = getattr(getattr(event, "message_obj", None), "message_id", None)
-        target_language = self._merged_forward_target_language(rule or {})
+        rule_config = rule or {}
+        target_language = self._merged_forward_target_language(rule_config)
         thread_label = self._merged_forward_label("merged_forward", target_language)
         thread_name = f"{thread_label} - {sender_name} - {message_id or time.strftime('%m%d-%H%M%S')}"
 
@@ -68,17 +69,26 @@ class DiscordForwardingMixin:
         avatar_url = DiscordWebhookManager.get_avatar_url(source_platform, sender_id)
         first_discord_msg_id = None
         all_sent = True
+        units = self._build_merged_forward_units(message_chain)
+        use_forward_translation_context = self._is_forward_record_translation_enabled(rule_config)
 
-        for unit_index, unit in enumerate(
-            self._build_merged_forward_units(message_chain),
-            start=1,
-        ):
+        for unit_index, unit in enumerate(units, start=1):
             try:
+                translation_context = (
+                    self._build_merged_forward_translation_context(
+                        units,
+                        unit_index - 1,
+                        target_language,
+                    )
+                    if use_forward_translation_context
+                    else None
+                )
                 content, embeds, files = await self._prepare_merged_forward_unit(
                     event,
                     unit,
-                    rule or {},
+                    rule_config,
                     mapping,
+                    translation_context,
                 )
                 chunks = self._split_discord_content(content)
                 for chunk_index, chunk in enumerate(chunks):

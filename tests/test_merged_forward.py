@@ -266,6 +266,44 @@ class MergedForwardTests(IsolatedAsyncioTestCase):
         self.assertLess(rendered.index("nested"), rendered.index("after"))
         self.assertLess(rendered.index("after"), rendered.index("two"))
 
+    def test_forward_translation_context_stays_within_sibling_level(self):
+        plugin = make_plugin()
+        units = [
+            {
+                "path": (1,),
+                "depth": 0,
+                "sender": "Outer",
+                "components": [FakePlain("outer-before")],
+            }
+        ]
+        units.extend(
+            {
+                "path": (1, index),
+                "depth": 1,
+                "sender": f"Nested {index}",
+                "components": [FakePlain(f"nested-{index}")],
+            }
+            for index in range(1, 12)
+        )
+        units.append(
+            {
+                "path": (2,),
+                "depth": 0,
+                "sender": "Outer",
+                "components": [FakePlain("outer-after")],
+            }
+        )
+
+        context = plugin._build_merged_forward_translation_context(units, 6, "English")
+        context_text = [item["content"] for item in context]
+
+        self.assertEqual(len(context), 10)
+        self.assertTrue(all(f"nested-{index}" in text for index, text in zip(
+            [1, 2, 3, 4, 5, 7, 8, 9, 10, 11], context_text
+        )))
+        self.assertFalse(any("outer-" in text for text in context_text))
+        self.assertFalse(any("nested-6" in text for text in context_text))
+
     async def test_translation_is_only_used_when_record_option_is_enabled(self):
         plugin = make_plugin()
         plugin.plugin_config = {"llm_translation": {"enabled": True}}
@@ -445,6 +483,66 @@ class MergedForwardTests(IsolatedAsyncioTestCase):
             plugin.webhook_manager.create_thread_for_channel.await_args.args,
             (123456, "Merged Forward - 发起人 - merge-1"),
         )
+
+    async def test_nested_forward_translation_passes_sibling_context_to_ai(self):
+        plugin = make_plugin()
+        plugin.plugin_config = {"llm_translation": {"enabled": True}}
+        plugin._translate_message = AsyncMock(return_value="translated")
+        plugin.webhook_manager = SimpleNamespace(
+            create_thread_for_channel=AsyncMock(return_value=SimpleNamespace(id=987)),
+            send_webhook_message=AsyncMock(return_value="discord-1"),
+        )
+        plugin.store = SimpleNamespace(
+            load_mappings=AsyncMock(return_value={}),
+            set_msg_mapping=AsyncMock(),
+        )
+        nested_nodes = [
+            FakeNode(f"Nested {index}", [FakePlain(f"nested-{index}")])
+            for index in range(1, 12)
+        ]
+        rule = {
+            "translation": {
+                "enabled": True,
+                "target_language": "English",
+                "translate_forward_records": True,
+            }
+        }
+
+        result = await plugin._forward_merged_forward_with_webhook(
+            make_event(),
+            "discord:ChannelMessage:123456",
+            [FakeNodes([
+                FakeNode(
+                    "Outer",
+                    [
+                        FakePlain("outer-before"),
+                        FakeNodes(nested_nodes),
+                        FakePlain("outer-after"),
+                    ],
+                )
+            ])],
+            "config-1",
+            "https://example.invalid/webhook",
+            rule,
+        )
+
+        self.assertTrue(result)
+        nested_call = next(
+            call
+            for call in plugin._translate_message.await_args_list
+            if call.args[1] == "nested-6"
+        )
+        context_text = [item["content"] for item in nested_call.kwargs["background_context"]]
+
+        self.assertEqual(len(context_text), 10)
+        self.assertTrue(all(
+            f"nested-{index}" in text
+            for index, text in zip(
+                [1, 2, 3, 4, 5, 7, 8, 9, 10, 11],
+                context_text,
+            )
+        ))
+        self.assertFalse(any("outer-" in text for text in context_text))
 
     async def test_thread_creation_or_single_send_failure_does_not_raise(self):
         plugin = make_plugin()

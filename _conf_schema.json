@@ -41,7 +41,7 @@
                 "default": ""
               },
               "translate_forward_records": {
-                "description": "是否翻译QQ合并转发记录中的文本内容（仅对合并转发生效）",
+                "description": "是否翻译QQ合并转发记录中的文本内容（仅对合并转发生效；翻译时默认向AI提供同一层级前后各最多5条记录作为背景）",
                 "type": "bool",
                 "default": false
               }
