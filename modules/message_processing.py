@@ -822,12 +822,15 @@ class MessageProcessingMixin:
         """Format merged-forward components and keep unsupported types visible."""
         renderable_components = []
         for component in components:
+            kind = self._component_kind(component)
+            if kind in {"face", "mface", "marketface", "market_face", "superface", "super_face"}:
+                renderable_components.append(Plain(text="[表情]"))
+                continue
             if not isinstance(component, dict):
                 renderable_components.append(component)
                 continue
 
             payload = component.get("data") if isinstance(component.get("data"), dict) else component
-            kind = self._component_kind(component)
             if kind == "plain":
                 renderable_components.append(Plain(text=str(payload.get("text") or "")))
             elif kind == "at":
@@ -850,7 +853,18 @@ class MessageProcessingMixin:
             skip_images=True,
         )
         extra_lines = []
-        handled = {"plain", "at", "image", "file"}
+        handled = {
+            "plain",
+            "at",
+            "image",
+            "file",
+            "face",
+            "mface",
+            "marketface",
+            "market_face",
+            "superface",
+            "super_face",
+        }
         for component in components:
             kind = self._component_kind(component)
             if kind in handled:

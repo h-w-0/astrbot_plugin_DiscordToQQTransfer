@@ -421,6 +421,45 @@ class MergedForwardTests(IsolatedAsyncioTestCase):
 
         self.assertIn("不支持的消息类型: Unsupported", content)
 
+    async def test_qq_super_face_dict_is_rendered_as_placeholder(self):
+        plugin = make_plugin()
+        content, _, _ = await plugin._prepare_merged_forward_unit(
+            make_event(),
+            {
+                "path": (1,),
+                "depth": 0,
+                "sender": "Alice",
+                "components": [
+                    {"type": "mface", "data": {"summary": "超级表情"}},
+                ],
+            },
+            {},
+            {},
+        )
+
+        self.assertIn("[表情]", content)
+        self.assertNotIn("不支持的消息类型", content)
+
+    async def test_qq_super_face_object_is_rendered_as_placeholder(self):
+        class SuperFace:
+            type = "mface"
+
+        plugin = make_plugin()
+        content, _, _ = await plugin._prepare_merged_forward_unit(
+            make_event(),
+            {
+                "path": (1,),
+                "depth": 0,
+                "sender": "Alice",
+                "components": [SuperFace()],
+            },
+            {},
+            {},
+        )
+
+        self.assertIn("[表情]", content)
+        self.assertNotIn("不支持的消息类型", content)
+
     def test_schema_contains_safe_default_for_record_translation(self):
         schema = json.loads((REPO_ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
         translation = schema["forward_rules"]["templates"]["forward_rule"]["items"]["translation"]["items"]
