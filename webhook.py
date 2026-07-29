@@ -18,6 +18,7 @@ except ImportError:
 # Discord API 限制
 MAX_CONTENT_LENGTH = 2000
 MAX_USERNAME_LENGTH = 80
+MAX_THREAD_NAME_LENGTH = 100
 # Discord 禁止的用户名子串（大小写不敏感）
 FORBIDDEN_USERNAME_SUBSTRINGS = ("discord", "clyde")
 REQUEST_TIMEOUT_SECONDS = 30
@@ -146,6 +147,56 @@ class DiscordWebhookManager:
             return None
 
     @staticmethod
+    def _sanitize_thread_name(name: str) -> str:
+        """清理并限制 Discord Thread 名称。"""
+        cleaned = re.sub(r"[\r\n\t\x00]+", " ", str(name or "")).strip()
+        cleaned = re.sub(r"\s+", " ", cleaned)
+        return (cleaned or "合并转发")[:MAX_THREAD_NAME_LENGTH]
+
+    async def create_thread_for_channel(self, channel_id: int, thread_name: str):
+        """在指定 Discord 频道创建公共 Thread，失败时返回 None。"""
+        if not HAS_DISCORD:
+            logger.error("未安装discord库，无法创建合并转发Thread")
+            return None
+
+        client = self._get_discord_client()
+        if not client:
+            logger.error("无法获取Discord客户端，无法创建合并转发Thread")
+            return None
+
+        try:
+            channel = client.get_channel(channel_id)
+            if channel is None and hasattr(client, "fetch_channel"):
+                channel = await client.fetch_channel(channel_id)
+            if channel is None:
+                logger.error(f"无法获取频道 {channel_id}，无法创建合并转发Thread")
+                return None
+
+            create_thread = getattr(channel, "create_thread", None)
+            if not callable(create_thread):
+                logger.error(f"频道 {channel_id} 不支持创建Thread")
+                return None
+
+            kwargs = {
+                "name": self._sanitize_thread_name(thread_name),
+                "type": discord.ChannelType.public_thread,
+                "reason": "QQ合并转发消息",
+            }
+            try:
+                return await create_thread(**kwargs)
+            except TypeError:
+                # 兼容测试替身及旧版适配器不接受 type/reason 参数的情况。
+                return await create_thread(name=kwargs["name"])
+        except Exception as e:
+            if isinstance(e, discord.Forbidden):
+                logger.error(f"机器人在频道 {channel_id} 没有创建Thread的权限")
+            elif isinstance(e, discord.HTTPException):
+                logger.error(f"创建合并转发Thread时发生HTTP错误: {e}")
+            else:
+                logger.error(f"创建合并转发Thread时发生未知错误: {e}")
+            return None
+
+    @staticmethod
     def extract_local_image_paths(message_chain) -> list:
         """从消息链中提取本地图片文件路径（v4.26+ 适配）"""
         paths = []
@@ -265,6 +316,7 @@ class DiscordWebhookManager:
         content: str,
         embeds: list | None = None,
         files: list[str] | None = None,
+        thread_id: int | str | None = None,
     ) -> str | None:
         """发送消息到Discord Webhook，返回Discord消息ID（失败返回None）
 
@@ -286,6 +338,10 @@ class DiscordWebhookManager:
             if embeds:
                 payload["embeds"] = embeds
 
+            params = {"wait": "true"}
+            if thread_id is not None:
+                params["thread_id"] = str(thread_id)
+
             session = await self._get_session()
 
             # 有本地文件时使用 multipart 上传
@@ -303,7 +359,7 @@ class DiscordWebhookManager:
                             filename=path.name,
                             content_type=mime,
                         )
-                async with session.post(webhook_url, data=form, params={"wait": "true"}) as resp:
+                async with session.post(webhook_url, data=form, params=params) as resp:
                     if resp.status not in (200, 201, 204):
                         body = await resp.text()
                         logger.error(f"Webhook发送失败 [HTTP {resp.status}]: {body[:500]}")
@@ -313,7 +369,7 @@ class DiscordWebhookManager:
                     data = await resp.json()
                     return data.get("id")
 
-            async with session.post(webhook_url, json=payload, params={"wait": "true"}) as resp:
+            async with session.post(webhook_url, json=payload, params=params) as resp:
                 if resp.status not in (200, 201, 204):
                     body = await resp.text()
                     logger.error(

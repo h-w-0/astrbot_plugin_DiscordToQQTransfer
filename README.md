@@ -15,6 +15,7 @@
   - Discord 端引用回复时，自动还原为 Discord 原生引用 + 跳转链接。
 - **Discord Webhook 集成**：自动为 Discord 频道创建 Webhook，以发送者身份显示头像和昵称。
 - **原生 Discord @提及**：QQ → Discord 转发时，QQ @提及自动转换为 Discord 原生 `<@user_id>` 格式。
+- **QQ 合并转发 Thread**：合并转发及嵌套节点递归发送到独立 Discord Thread，并保留节点顺序和层级。
 - **可持久化存储**：Webhook 与消息映射缓存自动保存，重启不丢失。
 
 ---
@@ -52,6 +53,8 @@
 `llm_translation` 提供所有翻译规则共用的 LLM 配置：
 
 - `use_recent_context`：开启后，将同一来源会话最近 5 条原消息作为上下文提供给翻译模型，仅用于语义消歧；模型仍只输出当前消息的译文。该上下文仅保存在内存中，插件重启后清空。
+
+每条 `forward_rules` 规则的 `translation.translate_forward_records` 可控制是否翻译 QQ 合并转发记录中的文本内容；默认关闭。图片、文件和引用元数据保持原样，翻译失败时回退到原文。
 
 ---
 
