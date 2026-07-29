@@ -186,13 +186,16 @@ class MessageProcessingMixin:
         """Extract the known OneBot get_forward_msg response shapes."""
         if isinstance(payload, list):
             raw_nodes = payload
+            source_key = None
         elif isinstance(payload, dict):
             data = payload
             raw_nodes = None
+            source_key = None
             for _ in range(3):
                 for key in ("messages", "message", "nodes", "nodeList"):
                     if isinstance(data, dict) and key in data:
                         raw_nodes = data[key]
+                        source_key = key
                         break
                 if raw_nodes is not None:
                     break
@@ -205,12 +208,88 @@ class MessageProcessingMixin:
                     raw_nodes = [data]
         else:
             raw_nodes = None
+            source_key = None
 
+        # ``get_msg`` also uses ``message`` for ordinary segments.  Do not
+        # turn a text/image segment list into fake forwarded nodes.
+        if source_key == "message" and isinstance(raw_nodes, (list, tuple)):
+            if raw_nodes and not any(cls._looks_like_forward_node(node) for node in raw_nodes):
+                raw_nodes = None
         if isinstance(raw_nodes, dict):
             raw_nodes = [raw_nodes]
         if not isinstance(raw_nodes, (list, tuple)):
             return []
         return [cls._normalize_forward_node(node) for node in raw_nodes]
+
+    @staticmethod
+    def _looks_like_forward_node(node) -> bool:
+        if not isinstance(node, dict):
+            return False
+        node_type = str(node.get("type") or "").strip().lower()
+        if node_type == "node":
+            return True
+        node_data = node.get("data") if isinstance(node.get("data"), dict) else node
+        if isinstance(node.get("sender"), dict):
+            return True
+        return any(
+            key in node_data
+            for key in ("nickname", "name", "user_id", "uin", "content")
+        ) and "message" in node_data
+
+    @classmethod
+    def _extract_single_forward_node(cls, payload) -> list[dict]:
+        """Extract a single node returned by a get_msg-compatible endpoint."""
+        data = payload
+        for _ in range(3):
+            if not isinstance(data, dict):
+                return []
+            if (
+                isinstance(data.get("sender"), dict)
+                and ("message" in data or "content" in data)
+            ):
+                return [cls._normalize_forward_node(data)]
+            nested_data = data.get("data")
+            if not isinstance(nested_data, dict):
+                return []
+            data = nested_data
+        return []
+
+    @classmethod
+    def _extract_inline_forward_nodes(cls, component) -> list[dict]:
+        """Extract nodes embedded in a Forward segment by some OneBot adapters."""
+        if isinstance(component, dict):
+            payload = component.get("data") if isinstance(component.get("data"), dict) else component
+        else:
+            payload = {
+                key: getattr(component, key, None)
+                for key in ("content", "messages", "nodes", "nodeList")
+                if getattr(component, key, None) is not None
+            }
+
+        raw_nodes = None
+        for key in ("messages", "nodes", "nodeList", "content"):
+            value = payload.get(key) if isinstance(payload, dict) else None
+            if value:
+                raw_nodes = value
+                break
+        if raw_nodes is None:
+            return []
+        if isinstance(raw_nodes, dict):
+            raw_nodes = [raw_nodes]
+        if not isinstance(raw_nodes, (list, tuple)):
+            return []
+
+        if raw_nodes and any(cls._looks_like_forward_node(node) for node in raw_nodes):
+            return [cls._normalize_forward_node(node) for node in raw_nodes]
+        # A few adapters expose one node's message chain as content directly.
+        return [
+            cls._normalize_forward_node(
+                {
+                    "sender": {},
+                    "message": list(raw_nodes),
+                }
+            )
+        ]
 
     async def _fetch_forward_payload(self, event, forward_id: str):
         """Fetch a forward record through AstrBot's OneBot client abstraction."""
@@ -237,12 +316,80 @@ class MessageProcessingMixin:
                 return result
         return None
 
+    @staticmethod
+    def _forward_fallback_ids(event, forward_id: str) -> list[str]:
+        """Return outer event IDs used by adapters that expose inner IDs."""
+        candidates = []
+        message_obj = getattr(event, "message_obj", None)
+        raw_message = getattr(message_obj, "raw_message", None)
+        values = [getattr(message_obj, "message_id", None)]
+        if isinstance(raw_message, dict):
+            values.append(raw_message.get("message_id"))
+        else:
+            values.append(getattr(raw_message, "message_id", None))
+        for value in values:
+            if value is None:
+                continue
+            value = str(value).strip()
+            if value and value != forward_id and value not in candidates:
+                candidates.append(value)
+        return candidates
+
+    async def _fetch_message_payload(self, event, message_id: str):
+        """Fetch one message as a fallback for adapters exposing inner nodes."""
+        if OneBotClient is not None:
+            return await OneBotClient(event).get_msg(message_id)
+
+        bot = getattr(event, "bot", None)
+        api = getattr(bot, "api", None)
+        call_action = getattr(api, "call_action", None)
+        if not callable(call_action):
+            return None
+        for params in ({"message_id": message_id}, {"id": message_id}):
+            try:
+                result = await call_action("get_msg", **params)
+            except Exception as exc:
+                logger.debug(f"[MergedForward] 获取单条转发节点 {params} 失败: {exc}")
+                continue
+            if isinstance(result, dict):
+                return result
+        return None
+
+    async def _resolve_forward_nodes(
+        self,
+        event,
+        nodes: list[dict],
+        cache: dict[str, dict],
+        active_ids: tuple[str, ...],
+    ) -> dict:
+        resolved_nodes = []
+        for node in nodes:
+            try:
+                resolved_nodes.append(
+                    await self._resolve_merged_forward_component(
+                        event,
+                        node,
+                        cache,
+                        active_ids,
+                        allow_outer_fallback=False,
+                    )
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"[MergedForward] 单个转发节点解析失败，保留节点占位: {exc}"
+                )
+                resolved_nodes.append(
+                    self._forward_placeholder_node("[单个转发节点解析失败]")
+                )
+        return {"type": "nodes", "data": {"nodes": resolved_nodes}}
+
     async def _resolve_merged_forward_component(
         self,
         event,
         component,
         cache: dict[str, dict],
         active_ids: tuple[str, ...] = (),
+        allow_outer_fallback: bool = False,
     ):
         """Resolve one component while retaining Node/Nodes structure for rendering."""
         kind = self._component_kind(component)
@@ -260,19 +407,63 @@ class MessageProcessingMixin:
             if forward_id in cache:
                 return cache[forward_id]
 
-            try:
-                payload = await self._fetch_forward_payload(event, forward_id)
-            except Exception as exc:
-                logger.warning(
-                    f"[MergedForward] 获取合并转发失败，id={forward_id}: {exc}"
-                )
-                placeholder = self._forward_placeholder_node(
-                    f"[合并转发解析失败: {forward_id}]"
-                )
-                cache[forward_id] = {"type": "nodes", "data": {"nodes": [placeholder]}}
-                return cache[forward_id]
+            nodes = self._extract_inline_forward_nodes(component)
+            if nodes:
+                logger.info(f"[MergedForward] 已使用 Forward 内联节点，id={forward_id}")
+            else:
+                try:
+                    payload = await self._fetch_forward_payload(event, forward_id)
+                except Exception as exc:
+                    logger.warning(
+                        f"[MergedForward] 获取合并转发失败，id={forward_id}: {exc}"
+                    )
+                    payload = None
 
-            nodes = self._extract_forward_nodes(payload)
+                nodes = self._extract_forward_nodes(payload)
+            outer_fallback_ids = (
+                self._forward_fallback_ids(event, forward_id)
+                if allow_outer_fallback
+                else []
+            )
+            if not nodes:
+                for fallback_id in outer_fallback_ids:
+                    try:
+                        fallback_payload = await self._fetch_forward_payload(
+                            event,
+                            fallback_id,
+                        )
+                        nodes = self._extract_forward_nodes(fallback_payload)
+                    except Exception as exc:
+                        logger.debug(
+                            f"[MergedForward] 使用外层消息 ID {fallback_id} 获取转发失败: {exc}"
+                        )
+                        nodes = []
+                    if nodes:
+                        logger.info(
+                            f"[MergedForward] Forward.id={forward_id} 无法直接获取，已使用外层消息 ID {fallback_id}"
+                        )
+                        break
+
+            if not nodes:
+                fallback_ids = [forward_id, *outer_fallback_ids]
+                for fallback_id in fallback_ids:
+                    try:
+                        fallback_payload = await self._fetch_message_payload(
+                            event,
+                            fallback_id,
+                        )
+                        nodes = self._extract_single_forward_node(fallback_payload)
+                    except Exception as exc:
+                        logger.debug(
+                            f"[MergedForward] 使用 get_msg 获取节点 {fallback_id} 失败: {exc}"
+                        )
+                        nodes = []
+                    if nodes:
+                        logger.info(
+                            f"[MergedForward] 已通过 get_msg 恢复转发节点，id={fallback_id}"
+                        )
+                        break
+
             if not nodes:
                 logger.warning(f"[MergedForward] 合并转发数据为空或格式异常，id={forward_id}")
                 placeholder = self._forward_placeholder_node(
@@ -281,17 +472,12 @@ class MessageProcessingMixin:
                 cache[forward_id] = {"type": "nodes", "data": {"nodes": [placeholder]}}
                 return cache[forward_id]
 
-            resolved_nodes = []
-            for node in nodes:
-                resolved_nodes.append(
-                    await self._resolve_merged_forward_component(
-                        event,
-                        node,
-                        cache,
-                        (*active_ids, forward_id),
-                    )
-                )
-            resolved = {"type": "nodes", "data": {"nodes": resolved_nodes}}
+            resolved = await self._resolve_forward_nodes(
+                event,
+                nodes,
+                cache,
+                (*active_ids, forward_id),
+            )
             cache[forward_id] = resolved
             return resolved
 
@@ -304,6 +490,7 @@ class MessageProcessingMixin:
                         child,
                         cache,
                         active_ids,
+                        allow_outer_fallback=False,
                     )
                 )
             return {"type": "nodes", "data": {"nodes": children}}
@@ -319,6 +506,7 @@ class MessageProcessingMixin:
                         child,
                         cache,
                         active_ids,
+                        allow_outer_fallback=False,
                     )
                 )
             if payload is None:
@@ -351,6 +539,7 @@ class MessageProcessingMixin:
                         event,
                         component,
                         cache,
+                        allow_outer_fallback=self._is_forward_reference_component(component),
                     )
                 )
             except Exception as exc:

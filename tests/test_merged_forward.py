@@ -40,8 +40,10 @@ class FakeNodes:
 class FakeForward:
     type = "Forward"
 
-    def __init__(self, forward_id):
+    def __init__(self, forward_id, content=None):
         self.id = forward_id
+        if content is not None:
+            self.content = content
 
 
 def make_event(message_id="merge-1", bot=None):
@@ -65,6 +67,77 @@ def make_plugin():
 
 
 class MergedForwardTests(IsolatedAsyncioTestCase):
+    async def test_inline_forward_nodes_are_used_before_remote_lookup(self):
+        async def call_action(*_args, **_kwargs):
+            raise AssertionError("inline content should not call OneBot")
+
+        plugin = make_plugin()
+        event = make_event(
+            bot=SimpleNamespace(api=SimpleNamespace(call_action=call_action))
+        )
+        resolved = await plugin._resolve_merged_forward_message(
+            event,
+            [
+                FakeForward(
+                    "inline",
+                    content=[
+                        {
+                            "sender": {"nickname": "Alice", "user_id": "1"},
+                            "message": [
+                                {"type": "text", "data": {"text": "inline"}}
+                            ],
+                        }
+                    ],
+                )
+            ],
+        )
+
+        self.assertIn("inline", plugin._format_merged_forward_text(resolved))
+
+    async def test_inner_forward_id_falls_back_to_outer_event_message_id(self):
+        calls = []
+
+        async def call_action(action, **params):
+            calls.append((action, params))
+            if action == "get_forward_msg" and params.get("message_id") == "inner-1":
+                return {
+                    "status": "failed",
+                    "retcode": 1200,
+                    "data": None,
+                    "message": "消息已过期或者为内层消息",
+                }
+            if action == "get_forward_msg" and params.get("message_id") == "outer-1":
+                return {
+                    "data": {
+                        "messages": [
+                            {
+                                "sender": {"nickname": "Alice", "user_id": "1"},
+                                "message": [
+                                    {"type": "text", "data": {"text": "restored"}}
+                                ],
+                            }
+                        ]
+                    }
+                }
+            raise RuntimeError("message is unavailable")
+
+        plugin = make_plugin()
+        event = make_event(
+            message_id="outer-1",
+            bot=SimpleNamespace(api=SimpleNamespace(call_action=call_action)),
+        )
+        resolved = await plugin._resolve_merged_forward_message(
+            event,
+            [FakeForward("inner-1")],
+        )
+
+        rendered = plugin._format_merged_forward_text(resolved)
+
+        self.assertIn("restored", rendered)
+        self.assertNotIn("合并转发解析失败", rendered)
+        self.assertIn(("get_forward_msg", {"message_id": "inner-1"}), calls)
+        self.assertIn(("get_forward_msg", {"message_id": "outer-1"}), calls)
+
     async def test_forward_component_is_fetched_and_nested_records_keep_order(self):
         calls = []
         payloads = {
