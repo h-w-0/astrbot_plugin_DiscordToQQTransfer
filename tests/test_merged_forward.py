@@ -411,6 +411,41 @@ class MergedForwardTests(IsolatedAsyncioTestCase):
         )
         plugin.store.set_msg_mapping.assert_awaited_once()
 
+    async def test_thread_title_uses_translation_language_and_preserves_sender_name(self):
+        plugin = make_plugin()
+        plugin.plugin_config = {"llm_translation": {"enabled": True}}
+        plugin._translate_message = AsyncMock(return_value="translated")
+        plugin.webhook_manager = SimpleNamespace(
+            create_thread_for_channel=AsyncMock(return_value=SimpleNamespace(id=987)),
+            send_webhook_message=AsyncMock(return_value="discord-1"),
+        )
+        plugin.store = SimpleNamespace(
+            load_mappings=AsyncMock(return_value={}),
+            set_msg_mapping=AsyncMock(),
+        )
+        rule = {
+            "translation": {
+                "enabled": True,
+                "target_language": "English",
+                "translate_forward_records": True,
+            }
+        }
+
+        result = await plugin._forward_merged_forward_with_webhook(
+            make_event(),
+            "discord:ChannelMessage:123456",
+            [FakeNodes([FakeNode("Alice", [FakePlain("first")])])],
+            "config-1",
+            "https://example.invalid/webhook",
+            rule,
+        )
+
+        self.assertTrue(result)
+        self.assertEqual(
+            plugin.webhook_manager.create_thread_for_channel.await_args.args,
+            (123456, "Merged Forward - 发起人 - merge-1"),
+        )
+
     async def test_thread_creation_or_single_send_failure_does_not_raise(self):
         plugin = make_plugin()
         plugin.store = SimpleNamespace(

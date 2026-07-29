@@ -628,6 +628,7 @@ class MessageProcessingMixin:
 
     def _merged_forward_label(self, key: str, target_language: str = "Chinese") -> str:
         labels = {
+            "merged_forward": ("合并转发", "Merged Forward"),
             "forward_record": ("转发记录", "Forward Record"),
             "nested_forward": ("嵌套转发", "Nested Forward"),
             "additional": ("附加", "Additional"),

@@ -39,7 +39,9 @@ class DiscordForwardingMixin:
         sender_id = self._event_value(event, "get_sender_id")
         source_platform = self._event_value(event, "get_platform_name", "aiocqhttp")
         message_id = getattr(getattr(event, "message_obj", None), "message_id", None)
-        thread_name = f"合并转发 - {sender_name} - {message_id or time.strftime('%m%d-%H%M%S')}"
+        target_language = self._merged_forward_target_language(rule or {})
+        thread_label = self._merged_forward_label("merged_forward", target_language)
+        thread_name = f"{thread_label} - {sender_name} - {message_id or time.strftime('%m%d-%H%M%S')}"
 
         try:
             thread = await self.webhook_manager.create_thread_for_channel(channel_id, thread_name)
