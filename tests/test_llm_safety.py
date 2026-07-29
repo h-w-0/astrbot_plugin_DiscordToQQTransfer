@@ -576,7 +576,8 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("timeout_seconds", translation_schema["items"])
         self.assertEqual(translation_schema["items"]["llm_max_tokens"]["default"], 512)
         self.assertEqual(translation_schema["items"]["reasoning_effort"]["default"], "")
-        self.assertIn("system_prompt", translation_schema["items"])
+        self.assertIn("use_recent_context", translation_schema["items"])
+        self.assertNotIn("system_prompt", translation_schema["items"])
         # 验证翻译供应商模板与安全筛查一致
         tl_providers = translation_schema["items"]["llm_providers"]
         self.assertEqual(tl_providers["type"], "template_list")
@@ -1125,6 +1126,109 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
         # 验证 system_prompt 被清空（Hy-MT2 兼容）
         self.assertEqual(call_kwargs["cfg"]["system_prompt"], "")
 
+    async def test_translation_context_uses_official_background_template(self):
+        plugin = object.__new__(MsgTransfer)
+        plugin._call_llm = AsyncMock(return_value="translated")
+        plugin.plugin_config = {
+            "llm_translation": {
+                "enabled": True,
+                "use_recent_context": True,
+                "system_prompt": "Translate the following text into {target_lang}: {source_text}",
+            }
+        }
+        rule = {
+            "source_umo": "aiocqhttp:GroupMessage:context-1",
+            "translation": {
+                "enabled": True,
+                "source_language": "Chinese",
+                "target_language": "English",
+            },
+        }
+
+        def make_event(message_id, sender, text):
+            return SimpleNamespace(
+                message_obj=SimpleNamespace(message_id=message_id),
+                unified_msg_origin="aiocqhttp:GroupMessage:context-1",
+                get_sender_name=lambda: sender,
+            )
+
+        await plugin._translate_message(make_event("ctx-1", "Alice", "前面的内容"), "前面的内容", rule)
+        await plugin._translate_message(make_event("ctx-2", "Bob", "当前内容"), "当前内容", rule)
+
+        prompt = plugin._call_llm.call_args_list[1].kwargs["prompt"]
+        self.assertIn("[Background Information]", prompt)
+        self.assertIn("Alice: 前面的内容", prompt)
+        self.assertIn("[Source Text]", prompt)
+        self.assertIn("当前内容", prompt)
+        self.assertIn("Translate the following text into English", prompt)
+
+    async def test_translation_context_uses_chinese_background_template(self):
+        plugin = object.__new__(MsgTransfer)
+        plugin._call_llm = AsyncMock(return_value="翻译结果")
+        plugin.plugin_config = {
+            "llm_translation": {
+                "enabled": True,
+                "use_recent_context": True,
+                "system_prompt": "将以下文本翻译为 {target_lang}：{source_text}",
+            }
+        }
+        rule = {
+            "source_umo": "aiocqhttp:GroupMessage:context-zh",
+            "translation": {
+                "enabled": True,
+                "source_language": "English",
+                "target_language": "Chinese",
+            },
+        }
+        make_event = lambda message_id: SimpleNamespace(
+            message_obj=SimpleNamespace(message_id=message_id),
+            unified_msg_origin="aiocqhttp:GroupMessage:context-zh",
+            get_sender_name=lambda: "用户",
+        )
+
+        await plugin._translate_message(make_event("ctx-zh-1"), "前文", rule)
+        await plugin._translate_message(make_event("ctx-zh-2"), "当前", rule)
+
+        prompt = plugin._call_llm.call_args_list[1].kwargs["prompt"]
+        self.assertIn("【背景信息】", prompt)
+        self.assertIn("请结合背景信息将以下文本翻译为 Chinese", prompt)
+        self.assertIn("【待翻译文本】", prompt)
+        self.assertIn("将以下文本翻译为 Chinese，注意只需要输出翻译后的结果", prompt)
+
+    def test_translation_context_keeps_last_five_and_deduplicates_current_message(self):
+        plugin = object.__new__(MsgTransfer)
+        rule = {"source_umo": "aiocqhttp:GroupMessage:context-window"}
+
+        def make_event(index):
+            return SimpleNamespace(
+                message_obj=SimpleNamespace(message_id=f"window-{index}"),
+                unified_msg_origin="aiocqhttp:GroupMessage:context-window",
+                get_sender_name=lambda: f"sender-{index}",
+            )
+
+        contexts = []
+        for index in range(1, 8):
+            contexts = plugin._remember_translation_context(
+                make_event(index),
+                f"message-{index}",
+                rule,
+            )
+
+        self.assertEqual(
+            [item["content"] for item in contexts],
+            ["message-2", "message-3", "message-4", "message-5", "message-6"],
+        )
+
+        duplicate_context = plugin._remember_translation_context(
+            make_event(7),
+            "message-7",
+            rule,
+        )
+        self.assertEqual(
+            [item["content"] for item in duplicate_context],
+            ["message-2", "message-3", "message-4", "message-5", "message-6"],
+        )
+
     async def test_translation_protects_discord_mentions_from_llm(self):
         plugin = object.__new__(MsgTransfer)
 
@@ -1340,7 +1444,7 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, "(从英文翻译)Hola")
         prompt = plugin._call_llm.call_args[1]["prompt"]
-        self.assertIn("Translate from English to Chinese: Hello", prompt)
+        self.assertIn("将以下文本翻译为 Chinese，注意只需要输出翻译后的结果", prompt)
 
     async def test_translation_empty_text_returns_none(self):
         plugin = object.__new__(MsgTransfer)
@@ -1385,9 +1489,10 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
         # langdetect 检测 "原始文本" 的实际结果（可能因环境不同略有差异）
         self.assertIn("Translated from Chinese)Translated text", result)
         plugin._call_llm.assert_awaited_once_with(
-            prompt="Translate into English: 原始文本",
+            prompt="Translate the following text into English. Note that you should only output the translated result without any additional explanation:\n\n原始文本",
             cfg={
                 "enabled": True,
+                "use_recent_context": False,
                 "system_prompt": "",
                 "timeout_seconds": 15,
                 "llm_max_tokens": 512,
@@ -1463,7 +1568,8 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config["timeout_seconds"], 30)
         self.assertEqual(config["llm_max_tokens"], 512)
         self.assertEqual(config["reasoning_effort"], "")
-        self.assertIn("{target_language}", config["system_prompt"])
+        self.assertNotIn("system_prompt", config)
+        self.assertFalse(config["use_recent_context"])
 
     def test_get_llm_translation_config_merges_with_defaults(self):
         plugin = object.__new__(MsgTransfer)
@@ -1483,7 +1589,7 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config["llm_max_tokens"], 2048)
         self.assertEqual(config["reasoning_effort"], "high")
         self.assertEqual(config["llm_providers"], [])
-        self.assertIn("{target_language}", config["system_prompt"])
+        self.assertNotIn("system_prompt", config)
 
 
 if __name__ == "__main__":

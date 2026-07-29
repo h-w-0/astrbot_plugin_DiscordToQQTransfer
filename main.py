@@ -3,7 +3,7 @@ import json
 import re
 import time
 import urllib.parse
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from pathlib import Path
 
 import aiohttp
@@ -513,6 +513,9 @@ class MsgTransferStore:
 # 插件主体
 # ------------------------
 class MsgTransfer(star.Star):
+    TRANSLATION_CONTEXT_SIZE = 5
+    MAX_TRANSLATION_CONTEXTS = 200
+
     def __init__(self, context: Context, config=None):
         super().__init__(context)
         self.plugin_config = config
@@ -526,6 +529,7 @@ class MsgTransfer(star.Star):
         self.store = MsgTransferStore(self.webhook_file, self.mapping_file, self.msg_mapping_file, self.forward_log_file)
         self.webhook_manager = DiscordWebhookManager(context)
         self._target_output_tails: dict[str, asyncio.Future] = {}
+        self._translation_contexts: OrderedDict[str, deque] = OrderedDict()
 
     def _get_config_forward_rules(self) -> dict:
         """读取 Dashboard 中配置的消息转发规则"""
@@ -947,11 +951,11 @@ class MsgTransfer(star.Star):
         """读取 LLM 翻译配置，缺失时返回安全默认值"""
         defaults = {
             "enabled": False,
+            "use_recent_context": False,
             "llm_providers": [],
             "timeout_seconds": 30,
             "llm_max_tokens": 512,
             "reasoning_effort": "",
-            "system_prompt": "Translate the following text from {source_language} into {target_language}. Only output the translated result, no additional explanation.\n\n{source_text}",
         }
         config = self.plugin_config or {}
         section = config.get("llm_translation", {}) if hasattr(config, "get") else {}
@@ -973,6 +977,10 @@ class MsgTransfer(star.Star):
         except (TypeError, ValueError):
             merged["llm_max_tokens"] = defaults["llm_max_tokens"]
         merged["enabled"] = self._coerce_config_bool(merged.get("enabled"), defaults["enabled"])
+        merged["use_recent_context"] = self._coerce_config_bool(
+            merged.get("use_recent_context"),
+            defaults["use_recent_context"],
+        )
         return merged
 
     def _get_current_llm_provider(self, umo: str | None = None):
@@ -1400,10 +1408,11 @@ class MsgTransfer(star.Star):
             return None
 
         target_language = str(rule_translation.get("target_language", "Chinese")).strip()
-        template = str(tl_cfg.get("system_prompt", ""))
 
         if not msg_text or not msg_text.strip():
             return None
+
+        recent_context = self._remember_translation_context(event, msg_text, rule)
 
         # 检测源语言
         source_language = str(rule_translation.get("source_language", "")).strip()
@@ -1413,9 +1422,29 @@ class MsgTransfer(star.Star):
         protected_text, protected_literals = self._protect_translation_literals(msg_text)
 
         try:
-            prompt = template.replace("{source_text}", protected_text)
-            prompt = prompt.replace("{target_language}", target_language)
-            prompt = prompt.replace("{source_language}", source_language)
+            prompt = self._build_translation_prompt(target_language, protected_text)
+            if tl_cfg.get("use_recent_context") and recent_context:
+                background_text = "\n".join(
+                    f"{item['sender']}: {item['content']}" if item["sender"] else item["content"]
+                    for item in recent_context
+                )
+                if self._is_chinese_language(target_language):
+                    prompt = (
+                        "【背景信息】\n"
+                        f"{background_text}\n\n"
+                        f"请结合背景信息将以下文本翻译为 {target_language}。\n\n"
+                        "【待翻译文本】\n"
+                        f"{prompt}"
+                    )
+                else:
+                    prompt = (
+                        "[Background Information]\n"
+                        f"{background_text}\n\n"
+                        f"Please translate the following text into {target_language}, "
+                        "taking the provided background information into consideration.\n\n"
+                        "[Source Text]\n"
+                        f"{prompt}"
+                    )
             if protected_literals:
                 prompt = (
                     "Keep all __ASTRBOT_KEEP_0000__-style placeholder tokens "
@@ -1448,6 +1477,56 @@ class MsgTransfer(star.Star):
         except llm_provider_error_types as e:
             logger.warning(f"LLM 翻译失败: {e}")
             return None
+
+    @classmethod
+    def _build_translation_prompt(cls, target_language: str, source_text: str) -> str:
+        """Build the fixed Hy-MT2 instruction; user-configured templates are ignored."""
+        if cls._is_chinese_language(target_language):
+            return (
+                f"将以下文本翻译为 {target_language}，注意只需要输出翻译后的结果，不要额外解释：\n\n"
+                f"{source_text}"
+            )
+        return (
+            f"Translate the following text into {target_language}. Note that you should only output "
+            f"the translated result without any additional explanation:\n\n{source_text}"
+        )
+
+    def _remember_translation_context(
+        self,
+        event: AstrMessageEvent,
+        msg_text: str,
+        rule: dict,
+    ) -> list[dict[str, str]]:
+        """Return the prior five messages and remember the current one once."""
+        contexts = getattr(self, "_translation_contexts", None)
+        if contexts is None:
+            contexts = OrderedDict()
+            self._translation_contexts = contexts
+
+        source_key = str(rule.get("source_umo") or getattr(event, "unified_msg_origin", ""))
+        history = contexts.get(source_key)
+        if history is None:
+            history = deque(maxlen=self.TRANSLATION_CONTEXT_SIZE + 1)
+            contexts[source_key] = history
+            if len(contexts) > self.MAX_TRANSLATION_CONTEXTS:
+                contexts.popitem(last=False)
+        else:
+            contexts.move_to_end(source_key)
+
+        message_id = getattr(getattr(event, "message_obj", None), "message_id", None)
+        message_key = str(message_id) if message_id is not None else f"event:{id(event)}"
+        recent_context = [
+            {"sender": sender, "content": content}
+            for stored_key, sender, content in history
+            if stored_key != message_key
+        ][-self.TRANSLATION_CONTEXT_SIZE:]
+
+        if not any(stored_key == message_key for stored_key, _sender, _content in history):
+            sender_getter = getattr(event, "get_sender_name", None)
+            sender = str(sender_getter() if callable(sender_getter) else "")
+            history.append((message_key, sender, str(msg_text)[:1000]))
+
+        return recent_context
 
     @staticmethod
     def _protect_translation_literals(text: str) -> tuple[str, dict[str, str]]:

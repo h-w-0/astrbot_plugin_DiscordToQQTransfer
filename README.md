@@ -49,6 +49,10 @@
 - `OpenAI Responses API` 供应商默认请求 `https://api.openai.com/v1/responses`，也支持填写兼容 Responses API 的自定义地址。
 - `block_on_error`：LLM 调用失败或超时时是否阻止转发。
 
+`llm_translation` 提供所有翻译规则共用的 LLM 配置：
+
+- `use_recent_context`：开启后，将同一来源会话最近 5 条原消息作为上下文提供给翻译模型，仅用于语义消歧；模型仍只输出当前消息的译文。该上下文仅保存在内存中，插件重启后清空。
+
 ---
 
 ## 📦 数据存储

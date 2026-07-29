@@ -210,6 +210,11 @@
         "type": "bool",
         "default": false
       },
+      "use_recent_context": {
+        "description": "将同一来源会话最近 5 条消息作为翻译上下文，仅用于语义消歧，不要求模型翻译上下文内容。",
+        "type": "bool",
+        "default": false
+      },
       "llm_providers": {
         "description": "LLM 供应商列表（按顺序依次尝试，第一个成功的即返回翻译结果）。可在 Dashboard 中动态增删排序。",
         "type": "template_list",
@@ -332,11 +337,6 @@
           "max": 120,
           "step": 1
         }
-      },
-      "system_prompt": {
-        "description": "翻译指令模板。可用占位符：{source_text}、{target_language}、{source_language}。",
-        "type": "text",
-        "default": "Translate the following text from {source_language} into {target_language}. Only output the translated result, no additional explanation.\n\n{source_text}"
       }
     }
   },
