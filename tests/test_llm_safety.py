@@ -728,6 +728,96 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
             rule,
         )
 
+    async def test_reply_uses_stored_translated_forward_content(self):
+        plugin = object.__new__(MsgTransfer)
+        plugin.store = SimpleNamespace(
+            get_msg_mapping=AsyncMock(return_value="discord-message-1"),
+            get_msg_meta=AsyncMock(
+                return_value={
+                    "user_id": "qq-user-1",
+                    "user_name": "tester",
+                    "origin": "qq",
+                    "forwarded_content": "(Translated from Chinese)Translated quote",
+                }
+            ),
+        )
+        plugin.webhook_manager = SimpleNamespace(get_discord_client=lambda: None)
+
+        result = await plugin._resolve_reply_target(
+            "qq-message-1",
+            "引用原文",
+            "discord:ChannelMessage:987654",
+        )
+
+        self.assertEqual(
+            result,
+            (
+                "discord-message-1",
+                None,
+                None,
+                "(Translated from Chinese)Translated quote",
+            ),
+        )
+
+    async def test_legacy_reply_mapping_reads_forwarded_discord_message(self):
+        channel = SimpleNamespace(
+            guild=SimpleNamespace(id=123),
+            fetch_message=AsyncMock(
+                return_value=SimpleNamespace(
+                    content="(Translated from Chinese)Translated legacy quote"
+                )
+            ),
+        )
+        client = SimpleNamespace(fetch_channel=AsyncMock(return_value=channel))
+        plugin = object.__new__(MsgTransfer)
+        plugin.store = SimpleNamespace(
+            get_msg_mapping=AsyncMock(return_value="456"),
+            get_msg_meta=AsyncMock(
+                return_value={
+                    "user_id": "qq-user-1",
+                    "user_name": "tester",
+                    "origin": "qq",
+                }
+            ),
+        )
+        plugin.webhook_manager = SimpleNamespace(get_discord_client=lambda: client)
+
+        result = await plugin._resolve_reply_target(
+            "qq-message-1",
+            "引用原文",
+            "discord:ChannelMessage:987654",
+        )
+
+        self.assertEqual(
+            result[3],
+            "(Translated from Chinese)Translated legacy quote",
+        )
+        channel.fetch_message.assert_awaited_once_with(456)
+
+    async def test_message_mapping_persists_forwarded_content_with_legacy_read_support(self):
+        store = object.__new__(module.MsgTransferStore)
+        store._msg_mapping_lock = asyncio.Lock()
+        store._msg_mapping = module.OrderedDict(
+            {"legacy": "discord-old|user-old|Old User"}
+        )
+        store._reverse_idx = {"discord-old": "legacy"}
+        store._save_msg_mapping = AsyncMock()
+
+        await store.set_msg_mapping(
+            "qq-new",
+            "discord-new",
+            "user-new",
+            "New User",
+            forwarded_content="(Translated from Chinese)Saved translation",
+        )
+
+        self.assertEqual(await store.get_msg_mapping("legacy"), "discord-old")
+        self.assertEqual(await store.get_msg_mapping("qq-new"), "discord-new")
+        self.assertEqual(
+            (await store.get_msg_meta("qq-new"))["forwarded_content"],
+            "(Translated from Chinese)Saved translation",
+        )
+
     async def test_rule_content_safety_blocks_before_any_send_path(self):
         plugin = object.__new__(MsgTransfer)
         plugin.store = SimpleNamespace(

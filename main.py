@@ -302,8 +302,12 @@ class MsgTransferStore:
         if self._msg_mapping is None:
             return
         for qq_id, val in self._msg_mapping.items():
-            d_id = val.split('|')[0] if isinstance(val, str) and '|' in val else str(val)
-            self._reverse_idx[d_id] = qq_id
+            if isinstance(val, dict):
+                d_id = str(val.get("discord_msg_id", ""))
+            else:
+                d_id = val.split('|')[0] if isinstance(val, str) and '|' in val else str(val)
+            if d_id:
+                self._reverse_idx[d_id] = qq_id
 
     async def _load_msg_mapping_raw(self) -> OrderedDict:
         """加载原始 msg_mapping 缓存（可变的，在锁内通过 move_to_end 追踪 LRU）"""
@@ -319,22 +323,26 @@ class MsgTransferStore:
         await self._write_json(self.msg_mapping_file, dict(data))
 
     async def set_msg_mapping(self, qq_msg_id: str, discord_msg_id: str,
-                              qq_user_id: str = "", qq_user_name: str = "", origin: str = "qq"):
+                              qq_user_id: str = "", qq_user_name: str = "", origin: str = "qq",
+                              forwarded_content: str = ""):
         async with self._msg_mapping_lock:
             data = await self._load_msg_mapping_raw()
 
             if qq_msg_id in data:
                 old_val = data[qq_msg_id]
-                old_d_id = old_val.split('|')[0] if isinstance(old_val, str) and '|' in old_val else str(old_val)
+                if isinstance(old_val, dict):
+                    old_d_id = str(old_val.get("discord_msg_id", ""))
+                else:
+                    old_d_id = old_val.split('|')[0] if isinstance(old_val, str) and '|' in old_val else str(old_val)
                 self._reverse_idx.pop(old_d_id, None)
 
-            if qq_user_id:
-                if origin and origin != "qq":
-                    data[qq_msg_id] = f"{discord_msg_id}|{qq_user_id}|{qq_user_name}|{origin}"
-                else:
-                    data[qq_msg_id] = f"{discord_msg_id}|{qq_user_id}|{qq_user_name}"
-            else:
-                data[qq_msg_id] = discord_msg_id
+            data[qq_msg_id] = {
+                "discord_msg_id": str(discord_msg_id),
+                "user_id": str(qq_user_id or ""),
+                "user_name": str(qq_user_name or qq_user_id or ""),
+                "origin": str(origin or "qq"),
+                "forwarded_content": str(forwarded_content or ""),
+            }
 
             if len(data) > self.MAX_MSG_MAPPINGS:
                 for _ in range(self.MSG_MAPPING_TRIM):
@@ -355,6 +363,9 @@ class MsgTransferStore:
             if val is None:
                 return None
             data.move_to_end(qq_msg_id)
+            if isinstance(val, dict):
+                discord_msg_id = val.get("discord_msg_id")
+                return str(discord_msg_id) if discord_msg_id else None
             if isinstance(val, str) and '|' in val:
                 return val.split('|')[0]
             return val
@@ -366,6 +377,13 @@ class MsgTransferStore:
             if val is None:
                 return None
             data.move_to_end(qq_msg_id)
+            if isinstance(val, dict):
+                return {
+                    "user_id": str(val.get("user_id", "")),
+                    "user_name": str(val.get("user_name") or val.get("user_id", "")),
+                    "origin": str(val.get("origin") or "qq"),
+                    "forwarded_content": str(val.get("forwarded_content") or ""),
+                }
             if isinstance(val, str) and '|' in val:
                 parts = val.split('|')
                 return {
@@ -1690,15 +1708,18 @@ class MsgTransfer(star.Star):
         return quote_text, quote_sender, discord_sender_name
 
     async def _resolve_reply_target(self, reply_to_qq_id, quote_text, target_umo):
-        """解析回复目标，返回 (reply_to_discord_id, discord_sender_id, jump_url)"""
+        """解析回复目标，返回 Discord 消息、发送者、跳转链接和已转发内容。"""
         reply_to_discord_id = None
         discord_sender_id = None
+        forwarded_quote_text = None
         if reply_to_qq_id:
             reply_to_discord_id = await self.store.get_msg_mapping(reply_to_qq_id)
             if reply_to_discord_id:
                 meta = await self.store.get_msg_meta(reply_to_qq_id)
-                if meta and meta.get("origin") == "discord":
-                    discord_sender_id = meta.get("user_id")
+                if meta:
+                    forwarded_quote_text = meta.get("forwarded_content") or None
+                    if meta.get("origin") == "discord":
+                        discord_sender_id = meta.get("user_id")
 
         if reply_to_discord_id is None and quote_text:
             fwd_discord_id = await self.store.find_forward_log_by_content(quote_text)
@@ -1723,10 +1744,16 @@ class MsgTransfer(star.Star):
                         if hasattr(channel, 'guild') and channel.guild:
                             guild_id = channel.guild.id
                             jump_url = f"https://discord.com/channels/{guild_id}/{channel_id}/{reply_to_discord_id}"
+                        if not forwarded_quote_text and hasattr(channel, "fetch_message"):
+                            try:
+                                referenced_message = await channel.fetch_message(int(reply_to_discord_id))
+                                forwarded_quote_text = getattr(referenced_message, "content", None) or None
+                            except Exception as exc:
+                                logger.debug(f"读取 Discord 被引用消息失败，继续使用原引用文本: {exc}")
                 except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, OSError) as e:
                     logger.warning(f"构建 Discord jump URL 失败: {e}")
 
-        return reply_to_discord_id, discord_sender_id, jump_url
+        return reply_to_discord_id, discord_sender_id, jump_url, forwarded_quote_text
 
     @staticmethod
     def _replace_ats(
@@ -1811,9 +1838,11 @@ class MsgTransfer(star.Star):
             quote_text, quote_sender, discord_sender_name = self._resolve_forward_quote(quote_text, quote_sender)
 
             # Step 3: 解析 Discord 端回复目标
-            reply_to_discord_id, discord_sender_id, jump_url = await self._resolve_reply_target(
+            reply_to_discord_id, discord_sender_id, jump_url, forwarded_quote_text = await self._resolve_reply_target(
                 reply_to_qq_id, quote_text, target_umo
             )
+            if forwarded_quote_text:
+                quote_text = forwarded_quote_text
 
             # Step 4: 替换 @提及
             protected_mentions: dict[str, str] = {}
@@ -1865,7 +1894,13 @@ class MsgTransfer(star.Star):
                     qq_user_id = event.get_sender_id()
                     qq_user_name = event.get_sender_name()
                     try:
-                        await self.store.set_msg_mapping(qq_msg_id, discord_msg_id, qq_user_id, qq_user_name)
+                        await self.store.set_msg_mapping(
+                            qq_msg_id,
+                            discord_msg_id,
+                            qq_user_id,
+                            qq_user_name,
+                            forwarded_content=raw_content,
+                        )
                     except Exception as e:
                         logger.error(f"保存消息映射 #{rule_id} 失败(不影响发送): {e}")
                 return True
