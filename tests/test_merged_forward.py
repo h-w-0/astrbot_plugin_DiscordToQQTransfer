@@ -37,8 +37,15 @@ class FakeNodes:
         self.nodes = nodes
 
 
-def make_event(message_id="merge-1"):
-    return SimpleNamespace(
+class FakeForward:
+    type = "Forward"
+
+    def __init__(self, forward_id):
+        self.id = forward_id
+
+
+def make_event(message_id="merge-1", bot=None):
+    event = SimpleNamespace(
         message_obj=SimpleNamespace(message_id=message_id),
         get_sender_name=lambda: "发起人",
         get_sender_id=lambda: "42",
@@ -46,6 +53,9 @@ def make_event(message_id="merge-1"):
         get_self_id=lambda: "bot",
         unified_msg_origin="aiocqhttp:GroupMessage:123",
     )
+    if bot is not None:
+        event.bot = bot
+    return event
 
 
 def make_plugin():
@@ -55,6 +65,106 @@ def make_plugin():
 
 
 class MergedForwardTests(IsolatedAsyncioTestCase):
+    async def test_forward_component_is_fetched_and_nested_records_keep_order(self):
+        calls = []
+        payloads = {
+            "root": {
+                "data": {
+                    "messages": [
+                        {
+                            "sender": {"nickname": "Alice", "user_id": "1"},
+                            "message": [
+                                {"type": "text", "data": {"text": "first"}},
+                                {"type": "forward", "data": {"id": "nested"}},
+                                {"type": "text", "data": {"text": "after"}},
+                            ],
+                        },
+                        {
+                            "sender": {"nickname": "Carol", "user_id": "3"},
+                            "message": [
+                                {"type": "text", "data": {"text": "second"}},
+                            ],
+                        },
+                    ]
+                }
+            },
+            "nested": {
+                "data": {
+                    "messages": [
+                        {
+                            "sender": {"nickname": "Bob", "user_id": "2"},
+                            "message": [
+                                {"type": "text", "data": {"text": "nested"}},
+                            ],
+                        }
+                    ]
+                }
+            },
+        }
+
+        async def call_action(_action, **params):
+            calls.append(params)
+            return payloads[str(params.get("message_id") or params.get("id"))]
+
+        plugin = make_plugin()
+        event = make_event(
+            bot=SimpleNamespace(api=SimpleNamespace(call_action=call_action))
+        )
+        resolved = await plugin._resolve_merged_forward_message(
+            event,
+            [FakeForward("root")],
+        )
+
+        units = plugin._build_merged_forward_units(resolved)
+        rendered = plugin._format_merged_forward_text(resolved)
+
+        self.assertEqual([unit["path"] for unit in units], [(1,), (1, 1), (1,), (2,)])
+        self.assertEqual(
+            [
+                unit["components"][0].get("data", {}).get("text")
+                for unit in units
+                if unit["components"]
+            ],
+            ["first", "nested", "after", "second"],
+        )
+        self.assertLess(rendered.index("first"), rendered.index("nested"))
+        self.assertLess(rendered.index("nested"), rendered.index("after"))
+        self.assertLess(rendered.index("after"), rendered.index("second"))
+        self.assertEqual(
+            [str(params.get("message_id")) for params in calls],
+            ["root", "nested"],
+        )
+
+    async def test_forward_fetch_failure_keeps_readable_placeholder(self):
+        async def call_action(_action, **_params):
+            raise RuntimeError("OneBot unavailable")
+
+        plugin = make_plugin()
+        event = make_event(
+            bot=SimpleNamespace(api=SimpleNamespace(call_action=call_action))
+        )
+        resolved = await plugin._resolve_merged_forward_message(
+            event,
+            [FakeForward("broken")],
+        )
+
+        rendered = plugin._format_merged_forward_text(resolved)
+
+        self.assertIn("[合并转发解析失败: broken]", rendered)
+
+    async def test_forward_without_bot_does_not_raise(self):
+        plugin = make_plugin()
+
+        resolved = await plugin._resolve_merged_forward_message(
+            make_event(),
+            [FakeForward("missing-bot")],
+        )
+
+        self.assertIn(
+            "[合并转发解析失败: missing-bot]",
+            plugin._format_merged_forward_text(resolved),
+        )
+
     def test_nested_nodes_keep_order_and_hierarchy(self):
         plugin = make_plugin()
         message_chain = [

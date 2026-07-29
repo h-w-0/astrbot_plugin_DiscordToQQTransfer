@@ -77,7 +77,20 @@ class ForwardingMixin:
                 if target_umo not in output_slots:
                     output_slots[target_umo] = self._reserve_target_output_slot(target_umo)
 
-            message_chain = event.get_messages()
+            raw_message_chain = event.get_messages()
+            try:
+                # Resolve remote Forward(id) components once so every target
+                # receives the same ordered snapshot of the QQ record.
+                message_chain = await self._resolve_merged_forward_message(
+                    event,
+                    raw_message_chain,
+                )
+            except Exception as exc:
+                logger.error(
+                    f"[MergedForward] 远程聊天记录解析异常，继续使用原始消息链: {exc}",
+                    exc_info=True,
+                )
+                message_chain = raw_message_chain
             platform = event.get_platform_name()
             if platform == "discord":
                 discord_msg_id = event.message_obj.message_id
