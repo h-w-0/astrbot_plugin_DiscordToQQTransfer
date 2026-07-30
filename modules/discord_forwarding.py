@@ -350,7 +350,14 @@ class DiscordForwardingMixin:
             return original_text
 
         try:
-            translated_text = await self._translate_message(event, original_text, rule)
+            translated_text = await self._translate_message(
+                event,
+                original_text,
+                rule,
+                translation_session_id=(
+                    f"{self._build_translation_session_id(event)}:quote"
+                ),
+            )
         except Exception as exc:
             logger.warning(f"引用文本翻译失败，回退原文: {exc}")
             return original_text

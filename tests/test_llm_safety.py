@@ -771,12 +771,12 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_webhook_quote_is_translated_for_current_rule(self):
-        from astrbot.api.message_components import Plain, Reply
+        from astrbot.api.message_components import At, Plain, Reply
 
         plugin = object.__new__(MsgTransfer)
         plugin.plugin_config = {"llm_translation": {"enabled": True}}
         plugin.store = SimpleNamespace(
-            load_mappings=AsyncMock(return_value={}),
+            load_mappings=AsyncMock(return_value={"123": "Selyne"}),
             get_msg_mapping=AsyncMock(return_value="discord-message-1"),
             get_msg_meta=AsyncMock(
                 return_value={
@@ -791,7 +791,7 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
             send_webhook_message=AsyncMock(return_value="discord-message-2"),
         )
 
-        async def translate(_event, text, _rule):
+        async def translate(_event, text, _rule, **_kwargs):
             return f"(Translated from Chinese)translated:{text}"
 
         plugin._translate_message = AsyncMock(side_effect=translate)
@@ -815,6 +815,7 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
                     message_str="引用中文",
                     sender_nickname="原作者",
                 ),
+                At(qq="123"),
                 Plain(text="正文中文"),
             ],
             "config-1",
@@ -825,11 +826,23 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result)
         content = plugin.webhook_manager.send_webhook_message.await_args.kwargs["content"]
         self.assertIn("> **原作者**: (Translated from Chinese)translated:引用中文", content)
-        self.assertIn("(Translated from Chinese)translated:正文中文", content)
+        self.assertIn(
+            "(Translated from Chinese)translated:@Selyne 正文中文",
+            content,
+        )
         self.assertNotIn("Stale translation", content)
         self.assertEqual(
             [call.args[1] for call in plugin._translate_message.await_args_list],
-            ["正文中文", "引用中文"],
+            ["__ASTRBOT_AT_0__正文中文", "引用中文"],
+        )
+        self.assertNotIn(
+            "translation_session_id",
+            plugin._translate_message.await_args_list[0].kwargs,
+        )
+        self.assertTrue(
+            plugin._translate_message.await_args_list[1]
+            .kwargs["translation_session_id"]
+            .endswith(":quote")
         )
 
     async def test_legacy_reply_mapping_reads_forwarded_discord_message(self):

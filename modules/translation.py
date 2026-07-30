@@ -158,6 +158,7 @@ class TranslationMixin:
         msg_text: str,
         rule: dict,
         background_context: list[dict[str, str]] | None = None,
+        translation_session_id: str | None = None,
     ) -> str | None:
         """Translate a rule-enabled message, returning None on disabled or failed calls."""
         translation_config = self._get_llm_translation_config()
@@ -225,7 +226,10 @@ class TranslationMixin:
             response_text = await self._call_llm(
                 prompt=prompt,
                 cfg=provider_config,
-                session_id=self._build_translation_session_id(event),
+                session_id=(
+                    translation_session_id
+                    or self._build_translation_session_id(event)
+                ),
                 umo=getattr(event, "unified_msg_origin", None),
                 tag="翻译",
             )
