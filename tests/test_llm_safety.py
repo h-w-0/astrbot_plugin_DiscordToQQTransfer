@@ -770,6 +770,68 @@ class LlmSafetyCheckTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
+    async def test_webhook_quote_is_translated_for_current_rule(self):
+        from astrbot.api.message_components import Plain, Reply
+
+        plugin = object.__new__(MsgTransfer)
+        plugin.plugin_config = {"llm_translation": {"enabled": True}}
+        plugin.store = SimpleNamespace(
+            load_mappings=AsyncMock(return_value={}),
+            get_msg_mapping=AsyncMock(return_value="discord-message-1"),
+            get_msg_meta=AsyncMock(
+                return_value={
+                    "origin": "qq",
+                    "forwarded_content": "(Translated from Chinese)Stale translation",
+                }
+            ),
+            set_msg_mapping=AsyncMock(),
+        )
+        plugin.webhook_manager = SimpleNamespace(
+            get_discord_client=lambda: None,
+            send_webhook_message=AsyncMock(return_value="discord-message-2"),
+        )
+
+        async def translate(_event, text, _rule):
+            return f"(Translated from Chinese)translated:{text}"
+
+        plugin._translate_message = AsyncMock(side_effect=translate)
+        event = SimpleNamespace(
+            message_obj=SimpleNamespace(message_id="qq-message-2"),
+            get_sender_name=lambda: "发送者",
+            get_sender_id=lambda: "qq-user-2",
+            get_platform_name=lambda: "aiocqhttp",
+            get_self_id=lambda: "bot",
+        )
+        rule = {
+            "translation": {"enabled": True, "target_language": "English"},
+        }
+
+        result = await plugin._forward_with_webhook(
+            event,
+            "discord:ChannelMessage:987654",
+            [
+                Reply(
+                    id="qq-message-1",
+                    message_str="引用中文",
+                    sender_nickname="原作者",
+                ),
+                Plain(text="正文中文"),
+            ],
+            "config-1",
+            "https://example.invalid/webhook",
+            rule,
+        )
+
+        self.assertTrue(result)
+        content = plugin.webhook_manager.send_webhook_message.await_args.kwargs["content"]
+        self.assertIn("> **原作者**: (Translated from Chinese)translated:引用中文", content)
+        self.assertIn("(Translated from Chinese)translated:正文中文", content)
+        self.assertNotIn("Stale translation", content)
+        self.assertEqual(
+            [call.args[1] for call in plugin._translate_message.await_args_list],
+            ["正文中文", "引用中文"],
+        )
+
     async def test_legacy_reply_mapping_reads_forwarded_discord_message(self):
         channel = SimpleNamespace(
             guild=SimpleNamespace(id=123),

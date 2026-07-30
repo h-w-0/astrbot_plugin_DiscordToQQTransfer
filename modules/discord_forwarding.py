@@ -338,6 +338,24 @@ class DiscordForwardingMixin:
             forwarded_quote_text,
         )
 
+    async def _translate_webhook_quote(
+        self,
+        event,
+        quote_text: str,
+        rule: dict | None,
+    ) -> str:
+        """Translate a QQ quote using the current forwarding rule."""
+        original_text = str(quote_text or "")
+        if not original_text.strip() or not self._is_translation_enabled_for_rule(rule):
+            return original_text
+
+        try:
+            translated_text = await self._translate_message(event, original_text, rule)
+        except Exception as exc:
+            logger.warning(f"引用文本翻译失败，回退原文: {exc}")
+            return original_text
+        return translated_text or original_text
+
     async def _forward_with_webhook(
         self,
         event,
@@ -360,6 +378,7 @@ class DiscordForwardingMixin:
                 quote_text,
                 quote_sender,
             )
+            has_original_quote_text = bool(str(quote_text or "").strip())
 
             translation_enabled = self._is_translation_enabled_for_rule(rule)
             (
@@ -373,7 +392,7 @@ class DiscordForwardingMixin:
                 target_umo,
                 prefer_forwarded_content=translation_enabled,
             )
-            if forwarded_quote_text:
+            if forwarded_quote_text and not has_original_quote_text:
                 quote_text = forwarded_quote_text
 
             protected_mentions: dict[str, str] = {}
@@ -404,6 +423,10 @@ class DiscordForwardingMixin:
             if translated:
                 raw_content = translated
             raw_content = self._restore_translation_literals(raw_content, protected_mentions)
+            if has_original_quote_text:
+                # Stored content can belong to another target language. Translate
+                # the original QQ quote for this rule instead of reusing that cache.
+                quote_text = await self._translate_webhook_quote(event, quote_text, rule)
 
             content = self._build_webhook_quote(
                 raw_content,
