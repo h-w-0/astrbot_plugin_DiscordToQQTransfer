@@ -273,7 +273,10 @@ class ForwardingMixin:
                 source_platform_name = event.get_platform_name()
                 message_text = DiscordWebhookManager.format_message_content(message_chain)
                 if message_text:
-                    full_text = f"[转发] {sender_name} ({source_platform_name})​: {message_text}"
+                    full_text = (
+                        f"[转发] {sender_name} ({source_platform_name})​:\n"
+                        f"{message_text}"
+                    )
                 else:
                     full_text = f"[转发] {sender_name} ({source_platform_name})​"
 
