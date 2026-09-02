@@ -389,7 +389,7 @@ class DiscordWebhookManager:
         """构建虚拟用户名"""
         platform_map = {
             "aiocqhttp": "QQ",
-            "discord": "Discord",
+            "discord": "DC",
         }
         platform_name = platform_map.get(source_platform, source_platform)
         return f"{sender_name} ({platform_name})"
