@@ -265,7 +265,7 @@ class TranslationMixin:
                 if show_bilingual:
                     # 原文用翻译前的 msg_text（或 protected 前的原文）
                     original = msg_text.strip()
-                    return f"{original}\n========\n{final_translated}"
+                    return f"\n{original}\n========\n{final_translated}"
                 
                 return final_translated
             return None
