@@ -7,9 +7,9 @@ import aiohttp
 from astrbot.api import logger
 
 try:
-    from astrbot.api.message_components import Plain, Reply, At, MessageChain
+    from astrbot.api.message_components import Plain, Reply, Image, At, MessageChain
 except ImportError:
-    from astrbot.core.message.components import Plain, Reply, At
+    from astrbot.core.message.components import Plain, Reply, Image, At
     from astrbot.core.message.message_event_result import MessageChain
 
 from ..webhook import DiscordWebhookManager
@@ -143,9 +143,12 @@ class DiscordForwardingMixin:
         sender_name,
         msg_text,
         full_text,
+        image_sources: list[str] | None = None,
     ):
         """Build the platform message chain used for non-webhook forwarding."""
         chain_parts = []
+        image_sources = image_sources or []
+    
         if source_platform_name == "discord":
             raw_message = getattr(event.message_obj, "raw_message", None)
             if raw_message:
@@ -166,11 +169,33 @@ class DiscordForwardingMixin:
                                 chain_parts.append(Plain(text=f" {msg_text}"))
                         else:
                             chain_parts.append(Reply(id=original_qq_id))
-
+    
         if not chain_parts:
             chain_parts.append(Plain(text=full_text))
         elif not any(isinstance(component, At) for component in chain_parts):
             chain_parts.append(Plain(text=full_text))
+    
+        # 追加图片（HTTP URL 或本地路径）
+        for src in image_sources:
+            if not src or not isinstance(src, str):
+                continue
+            src = src.strip()
+            if not src:
+                continue
+            try:
+                if src.startswith(("http://", "https://")):
+                    if hasattr(Image, "fromURL"):
+                        chain_parts.append(Image.fromURL(src))
+                    else:
+                        chain_parts.append(Image(file=src))
+                else:
+                    if hasattr(Image, "fromFileSystem"):
+                        chain_parts.append(Image.fromFileSystem(src))
+                    else:
+                        chain_parts.append(Image(file=src))
+            except Exception as exc:
+                logger.warning(f"构建 Image 组件失败，跳过: {src[:120]} ({exc})")
+    
         chain = MessageChain()
         chain.chain = chain_parts
         return chain
