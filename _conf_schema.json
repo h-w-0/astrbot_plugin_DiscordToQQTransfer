@@ -44,6 +44,16 @@
                 "description": "是否翻译QQ合并转发记录中的文本内容（仅对合并转发生效；翻译时默认向AI提供同一层级前后各最多5条记录作为背景）",
                 "type": "bool",
                 "default": false
+              },
+              "show_translation_prefix": {
+                "description": "是否显示翻译提示，例如 (Translated from [Language]) / (从xxx翻译)",
+                "type": "bool",
+                "default": false
+              },
+              "show_bilingual": {
+                "description": "启用双语翻译：转发内容为「原文 + 分隔线 + 译文」",
+                "type": "bool",
+                "default": false
               }
             }
           },
