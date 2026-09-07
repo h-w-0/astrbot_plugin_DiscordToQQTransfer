@@ -271,15 +271,27 @@ class ForwardingMixin:
             try:
                 sender_name = event.get_sender_name()
                 source_platform_name = event.get_platform_name()
-                message_text = DiscordWebhookManager.format_message_content(message_chain)
+            
+                # 文本：跳过图片，避免变成 "[图片]"
+                message_text = DiscordWebhookManager.format_message_content(
+                    message_chain,
+                    skip_images=True,
+                )
+                # 图片 URL / 本地路径
+                image_urls = DiscordWebhookManager.extract_images(message_chain)
+                local_images = []
+                if hasattr(DiscordWebhookManager, "extract_local_image_paths"):
+                    local_images = DiscordWebhookManager.extract_local_image_paths(message_chain)
+                image_sources = list(image_urls) + list(local_images)
+            
                 if message_text:
                     full_text = (
-                        f"[转发] {sender_name} ({source_platform_name})​:\n"
+                        f"[转发] {sender_name} ({source_platform_name})\u200b:\n"
                         f"{message_text}"
                     )
                 else:
-                    full_text = f"[转发] {sender_name} ({source_platform_name})​"
-
+                    full_text = f"[转发] {sender_name} ({source_platform_name})\u200b"
+            
                 translated = await self._translate_message(
                     event,
                     message_text or full_text,
@@ -287,14 +299,18 @@ class ForwardingMixin:
                 )
                 if translated:
                     message_text = translated
-                    full_text = f"[转发] {sender_name} ({source_platform_name})​: {translated}"
-
+                    full_text = (
+                        f"[转发] {sender_name} ({source_platform_name})\u200b:\n"
+                        f"{translated}"
+                    )
+            
                 chain = await self._build_discord_reply_chain(
                     event,
                     source_platform_name,
                     sender_name,
                     message_text,
                     full_text,
+                    image_sources=image_sources,
                 )
                 await self._wait_for_target_output(output_predecessor)
                 sent, sent_result = await self._send_message_with_result(target, chain)
