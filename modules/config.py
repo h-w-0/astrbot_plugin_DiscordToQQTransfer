@@ -49,32 +49,54 @@ class ConfigMixin:
         raw_rules = config.get("forward_rules", []) if hasattr(config, "get") else []
         if not isinstance(raw_rules, list):
             return {}
-
+    
         rules = {}
         seen = set()
         for index, raw_rule in enumerate(raw_rules, start=1):
             if not isinstance(raw_rule, dict):
                 continue
-
+    
             source_umo = str(raw_rule.get("source_umo", "")).strip()
             target_umo = str(raw_rule.get("target_umo", "")).strip()
             if not source_umo or not target_umo:
                 continue
-
+    
             rule_key = (source_umo, target_umo)
             if rule_key in seen:
                 continue
             seen.add(rule_key)
+    
             content_safety = raw_rule.get("content_safety", {})
             safety_value = (
                 content_safety.get("enabled")
                 if isinstance(content_safety, dict)
                 else content_safety
             )
+    
+            raw_translation = raw_rule.get("translation", {})
+            if not isinstance(raw_translation, dict):
+                raw_translation = {}
+    
+            translation = {
+                **raw_translation,
+                "enabled": self._coerce_config_bool(
+                    raw_translation.get("enabled"), False
+                ),
+                "translate_forward_records": self._coerce_config_bool(
+                    raw_translation.get("translate_forward_records"), False
+                ),
+                "show_translation_prefix": self._coerce_config_bool(
+                    raw_translation.get("show_translation_prefix"), False
+                ),
+                "show_bilingual": self._coerce_config_bool(
+                    raw_translation.get("show_bilingual"), False
+                ),
+            }
+    
             rules[f"config-{index}"] = {
                 "source_umo": source_umo,
                 "target_umo": target_umo,
-                "translation": raw_rule.get("translation", {}),
+                "translation": translation,
                 "content_safety": {
                     "enabled": self._coerce_config_bool(safety_value, False),
                 },
