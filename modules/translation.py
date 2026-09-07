@@ -239,12 +239,35 @@ class TranslationMixin:
 
                     logger.warning("LLM 翻译返回内容疑似包含内部提示词，回退原文")
                     return None
-                prefix = self._format_translation_prefix(source_language, target_language)
+                # 原有：保护字面量恢复
                 translated_text = self._restore_translation_literals(
                     response_text.strip(),
                     protected_literals,
                 )
-                return f"{prefix}{translated_text}"
+                
+                rule_translation = rule.get("translation", {}) if isinstance(rule, dict) else {}
+                show_prefix = self._coerce_config_bool(
+                    rule_translation.get("show_translation_prefix"), False
+                )
+                show_bilingual = self._coerce_config_bool(
+                    rule_translation.get("show_bilingual"), False
+                )
+                
+                # 1. 翻译提示（默认关闭）
+                if show_prefix:
+                    prefix = self._format_translation_prefix(source_language, target_language)
+                else:
+                    prefix = ""
+                
+                final_translated = f"{prefix}{translated_text}" if prefix else translated_text
+                
+                # 2. 双语（默认关闭）
+                if show_bilingual:
+                    # 原文用翻译前的 msg_text（或 protected 前的原文）
+                    original = msg_text.strip()
+                    return f"{original}\n========\n{final_translated}"
+                
+                return final_translated
             return None
         except llm_provider_error_types as exc:
             from astrbot.api import logger
