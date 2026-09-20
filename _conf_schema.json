@@ -7,7 +7,15 @@
       "forward_rule": {
         "name": "消息转发规则",
         "description": "配置 source_umo 到 target_umo 的消息转发关系",
+        "display_item": "rule_name",
+        "hide_hint_in_list": true,
         "items": {
+          "rule_name": {
+            "description": "规则标题（仅用于在列表中区分，不影响转发逻辑）",
+            "type": "string",
+            "default": "",
+            "hint": "例如：QQ群A → Discord频道B"
+          },
           "source_umo": {
             "description": "源会话 UMO",
             "type": "string",
