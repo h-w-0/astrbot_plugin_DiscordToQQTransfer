@@ -186,6 +186,12 @@ class TranslationMixin:
             )
             return None
 
+        if not self._has_translatable_text(msg_text):
+            from astrbot.api import logger
+            logger.debug(f"跳过翻译：无可翻译正文 ({msg_text!r})")
+            return None
+
+        
         protected_text, protected_literals = self._protect_translation_literals(msg_text)
         try:
             context_messages = (
@@ -427,6 +433,26 @@ class TranslationMixin:
             "русский": "russian",
         }
         return aliases.get(key, key)
+
+    _TRANSLATABLE_TEXT_RE = re.compile(
+        r"[A-Za-z\u00C0-\u024F\u0400-\u04FF"
+        r"\u3040-\u30FF\u3400-\u9FFF\uAC00-\uD7AF"
+        r"\u0E00-\u0E7F\u0600-\u06FF\u0900-\u097F]"
+    )
+    
+    @classmethod
+    def _has_translatable_text(cls, text: str) -> bool:
+        """True only when there is real linguistic content (letters/scripts)."""
+        if not text or not str(text).strip():
+            return False
+        # 去掉 URL、提及占位后再判断
+        sample = _URL_RE.sub(" ", text)
+        sample = _TRANSLATION_LITERAL_RE.sub(" ", sample)
+        sample = " ".join(sample.split())
+        if not sample:
+            return False
+        # 必须含字母/汉字/假名/韩文等，纯 emoji、纯标点直接跳过
+        return bool(cls._TRANSLATABLE_TEXT_RE.search(sample))
     
     @classmethod
     def _is_same_language(cls, source_language: str, target_language: str) -> bool:
