@@ -11,7 +11,7 @@
         "hide_hint_in_list": true,
         "items": {
           "rule_name": {
-            "description": "规则标题（仅用于在列表中区分，不影响转发逻辑）",
+            "description": "备注：",
             "type": "string",
             "default": "",
             "hint": "例如：QQ群A → Discord频道B"
