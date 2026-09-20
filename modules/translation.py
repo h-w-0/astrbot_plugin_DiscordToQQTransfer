@@ -179,6 +179,12 @@ class TranslationMixin:
         source_language = str(rule_translation.get("source_language", "")).strip()
         if not source_language:
             source_language = self._detect_source_language(msg_text)
+        if self._is_same_language(source_language, target_language):
+            from astrbot.api import logger
+            logger.debug(
+                f"跳过翻译：源语言与目标语言相同 ({source_language} -> {target_language})"
+            )
+            return None
 
         protected_text, protected_literals = self._protect_translation_literals(msg_text)
         try:
@@ -384,6 +390,54 @@ class TranslationMixin:
     def _detect_source_language(text: str) -> str:
         return detect_source_language(text)
 
+    @staticmethod
+    def _normalize_language_key(language: str) -> str:
+        """Normalize language names/codes for equality checks."""
+        key = str(language or "").strip().lower().replace("_", "-")
+        aliases = {
+            "zh": "chinese",
+            "zh-cn": "chinese",
+            "zh-hans": "chinese",
+            "中文": "chinese",
+            "汉语": "chinese",
+            "漢語": "chinese",
+            "简体中文": "chinese",
+            "簡體中文": "chinese",
+            "zh-tw": "traditional chinese",
+            "zh-hant": "traditional chinese",
+            "繁体中文": "traditional chinese",
+            "繁體中文": "traditional chinese",
+            "traditional chinese": "traditional chinese",
+            "en": "english",
+            "en-us": "english",
+            "en-gb": "english",
+            "英语": "english",
+            "英文": "english",
+            "ja": "japanese",
+            "jp": "japanese",
+            "日语": "japanese",
+            "日文": "japanese",
+            "ko": "korean",
+            "韩语": "korean",
+            "韓語": "korean",
+            "韩文": "korean",
+            "ru": "russian",
+            "俄语": "russian",
+            "俄文": "russian",
+            "русский": "russian",
+        }
+        return aliases.get(key, key)
+    
+    @classmethod
+    def _is_same_language(cls, source_language: str, target_language: str) -> bool:
+        src = cls._normalize_language_key(source_language)
+        tgt = cls._normalize_language_key(target_language)
+        if not src or not tgt:
+            return False
+        if src in {"unknown", "auto", "und"}:
+            return False
+        return src == tgt
+    
     @staticmethod
     def _format_translation_prefix(source_language: str, target_language: str) -> str:
         """Build a Chinese or English translation prefix from the target language."""
