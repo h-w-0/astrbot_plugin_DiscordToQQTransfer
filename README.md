@@ -1,6 +1,6 @@
 # MsgTransfer —— AstrBot 跨平台消息转发插件
 
-> **本仓库基于 [Siaospeed/astrbot_plugin_msg_transfer](https://github.com/Siaospeed/astrbot_plugin_msg_transfer) 进行 fork 改动，遵守 AGPL-3.0 许可证。**
+> **本仓库基于 [/mmyddd/astrbot_plugin_DiscordToQQTransfer](https://github.com/mmyddd/astrbot_plugin_DiscordToQQTransfer) 进行 fork 改动，遵守 AGPL-3.0 许可证。**
 
 一个用于在 **QQ** 与 **Discord** 之间双向转发与同步消息的 AstrBot 插件，支持回复引用链还原、原生 @提及、图片转发等特性。
 
