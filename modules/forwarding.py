@@ -226,7 +226,15 @@ class ForwardingMixin:
                 if not allowed:
                     logger.warning(f"转发 #{rule_id} 被内容安全筛查拦截: {target}")
                     await self._wait_for_target_output(output_predecessor)
+                    # 1) 源端提示（原有）
                     await self._reply_safety_block(
+                        event,
+                        target,
+                        safety_reason,
+                        safety_output_language,
+                    )
+                    # 2) 目标端也通知
+                    await self._notify_target_safety_block(
                         event,
                         target,
                         safety_reason,
