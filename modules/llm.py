@@ -494,6 +494,76 @@ class LlmMixin:
                 "The safety review failed or timed out",
             )
 
+    async def _notify_target_safety_block(
+        self,
+        event,
+        target_umo: str,
+        reason: str,
+        output_language: str = "Chinese",
+    ):
+        """把拦截通知发到目标会话（源端提示仍由 _reply_safety_block 负责）。"""
+        chinese_output = self._is_chinese_language(output_language)
+        fallback_reason = (
+            "内容可能不符合安全策略"
+            if chinese_output
+            else "The content may violate the safety policy"
+        )
+        clean_reason = (reason or fallback_reason).strip()[:80]
+        sender_name = ""
+        try:
+            sender_name = str(event.get_sender_name() or "").strip()
+        except Exception:
+            sender_name = ""
+        if not sender_name:
+            try:
+                sender_name = str(event.get_sender_id() or "未知用户")
+            except Exception:
+                sender_name = "未知用户"
+    
+        if chinese_output:
+            notice = (
+                f"⚠️ 用户 {sender_name} 的消息未转发到 {target_umo}\n"
+                f"拦截原因：{clean_reason}。"
+            )
+        else:
+            notice = (
+                f"⚠️ Message from {sender_name} was not forwarded to {target_umo}\n"
+                f"Reason: {clean_reason}."
+            )
+    
+        try:
+            try:
+                from astrbot.api.message_components import Plain, MessageChain
+            except ImportError:
+                from astrbot.core.message.components import Plain
+                from astrbot.core.message.message_event_result import MessageChain
+    
+            chain = MessageChain()
+            chain.chain = [Plain(text=notice)]
+    
+            # 目标是 Discord 且已有 webhook 时，用 webhook 发，避免依赖平台 session
+            webhook_url = None
+            if hasattr(self, "store") and "discord" in str(target_umo).lower():
+                try:
+                    webhook_url = await self.store.get_webhook_url(target_umo)
+                except Exception:
+                    webhook_url = None
+    
+            if webhook_url and hasattr(self, "webhook_manager"):
+                await self.webhook_manager.send_webhook_message(
+                    webhook_url=webhook_url,
+                    username="MsgTransfer Safety",
+                    avatar_url="",
+                    content=notice,
+                )
+            elif hasattr(self, "_send_message_with_result"):
+                await self._send_message_with_result(target_umo, chain)
+            else:
+                await self.context.send_message(target_umo, chain)
+        except Exception as exc:
+            from astrbot.api import logger
+            logger.warning(f"向目标端发送内容安全拦截提示失败: {exc}")
+    
     async def _reply_safety_block(
         self,
         event,
