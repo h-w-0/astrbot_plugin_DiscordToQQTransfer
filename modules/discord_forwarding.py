@@ -469,7 +469,7 @@ class DiscordForwardingMixin:
             )
             embeds = [{"image": {"url": url}} for url in image_urls[:10]]
             if not content and not embeds and not local_images:
-                content = "[图片]"
+                content = "[转发不兼容]"
 
             await self._wait_for_target_output(output_predecessor)
             discord_msg_id = await self.webhook_manager.send_webhook_message(
